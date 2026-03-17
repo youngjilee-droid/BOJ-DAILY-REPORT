@@ -68,7 +68,7 @@ NAVER_COLUMN_MAP = {
     "소재": "광고명",
     "광고": "광고명",
     "광고명": "광고명",
-    "총비용(VAT포함,원)": "비용",
+    "총비용(vat포함,원)": "비용",
     "총비용": "비용",
     "광고비": "비용",
     "소진액": "비용",
@@ -287,10 +287,11 @@ def build_normalized_map(column_map: Dict[str, str]) -> Dict[str, str]:
     return normalized_map
 
 
-def detect_header_row(df_preview: pd.DataFrame, min_match: int = 2) -> int:
+def detect_header_row(df_preview: pd.DataFrame, min_match: int = 3, min_non_empty_cells: int = 4) -> int:
     """
     실제 헤더로 보이는 행 번호를 찾는다.
-    네이버처럼 상단 제목/설명 행이 있는 파일을 처리하기 위한 함수
+    제목행(예: 조선미녀_Daily(...))은 제외하고,
+    여러 컬럼명이 함께 있는 행만 헤더 후보로 인정한다.
     """
     header_keywords = [
         "날짜", "일자", "일별",
@@ -302,18 +303,31 @@ def detect_header_row(df_preview: pd.DataFrame, min_match: int = 2) -> int:
         "장바구니", "도달", "참여", "팔로우", "동영상"
     ]
 
+    title_keywords = [
+        "_daily", ":naver", "beautyofjoseon", "조선미녀_daily"
+    ]
+
     best_row_idx = 0
     best_score = -1
 
-    max_rows = min(len(df_preview), 10)
+    max_rows = min(len(df_preview), 15)
 
     for i in range(max_rows):
-        row_values = df_preview.iloc[i].fillna("").astype(str).tolist()
-        joined = " ".join(row_values)
+        row_series = df_preview.iloc[i].fillna("").astype(str).map(lambda x: x.strip())
+        row_values = row_series.tolist()
+
+        non_empty_cells = sum(1 for v in row_values if v != "")
+        if non_empty_cells < min_non_empty_cells:
+            continue
+
+        joined = " ".join(row_values).lower()
+
+        if any(keyword in joined for keyword in title_keywords):
+            continue
 
         score = 0
         for keyword in header_keywords:
-            if keyword in joined:
+            if keyword.lower() in joined:
                 score += 1
 
         if score > best_score:
@@ -323,7 +337,7 @@ def detect_header_row(df_preview: pd.DataFrame, min_match: int = 2) -> int:
     if best_score >= min_match:
         return best_row_idx
 
-    return 0
+    return 1
 
 
 def is_unnamed_column(col_name: str) -> bool:
@@ -377,8 +391,7 @@ def load_excel_file(uploaded_file) -> Optional[pd.DataFrame]:
 def load_naver_excel_file(uploaded_file) -> Optional[pd.DataFrame]:
     """
     네이버 XLSX 전용 로드
-    - 먼저 header=None으로 읽고
-    - 실제 헤더 행을 자동 탐지해서 컬럼 설정
+    - 제목행/설명행을 건너뛰고 실제 헤더 행을 찾아 컬럼 설정
     """
     try:
         uploaded_file.seek(0)
@@ -390,8 +403,9 @@ def load_naver_excel_file(uploaded_file) -> Optional[pd.DataFrame]:
         header_row = detect_header_row(raw_df)
 
         df = raw_df.iloc[header_row + 1:].copy()
-        df.columns = raw_df.iloc[header_row].fillna("").astype(str).tolist()
+        df.columns = raw_df.iloc[header_row].fillna("").astype(str).map(clean_column_name).tolist()
         df = df.reset_index(drop=True)
+        df = df.dropna(how="all")
 
         return df
 
@@ -402,8 +416,7 @@ def load_naver_excel_file(uploaded_file) -> Optional[pd.DataFrame]:
 def load_naver_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
     """
     네이버 CSV 전용 로드
-    - 여러 인코딩/구분자 시도
-    - header=None으로 먼저 읽고 실제 헤더 행 탐지
+    - 제목행/설명행을 건너뛰고 실제 헤더 행을 찾아 컬럼 설정
     """
     encodings = ["utf-8-sig", "utf-8", "cp949", "euc-kr", "utf-16"]
     separators = [None, ",", "\t", ";", "|"]
@@ -440,8 +453,9 @@ def load_naver_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
                 header_row = detect_header_row(raw_df)
 
                 df = raw_df.iloc[header_row + 1:].copy()
-                df.columns = raw_df.iloc[header_row].fillna("").astype(str).tolist()
+                df.columns = raw_df.iloc[header_row].fillna("").astype(str).map(clean_column_name).tolist()
                 df = df.reset_index(drop=True)
+                df = df.dropna(how="all")
 
                 return df
 
@@ -552,6 +566,15 @@ def standardize_columns(
     """
     work_df = df.copy()
 
+    # 네이버 보고서 제목행이 데이터로 섞여 들어온 경우 제거
+    if platform_name == "네이버":
+        work_df = work_df[
+            ~work_df.astype(str).apply(
+                lambda row: row.str.contains("조선미녀_Daily|beautyofjoseon:naver", case=False, na=False).any(),
+                axis=1
+            )
+        ].copy()
+
     # 불필요한 unnamed 컬럼 제거
     filtered_cols = [col for col in work_df.columns if not is_unnamed_column(col)]
     work_df = work_df[filtered_cols].copy()
@@ -598,25 +621,16 @@ def standardize_columns(
                 "매핑되지 않은 원본 컬럼명": col,
             })
 
-    # rename
     work_df = work_df.rename(columns=rename_dict)
-
-    # 중복 컬럼 병합
     work_df = coalesce_duplicate_columns(work_df)
 
-    # 필수 컬럼 없으면 빈 값 생성
     for col in FINAL_COLUMNS:
         if col not in work_df.columns:
             work_df[col] = ""
 
-    # 매체 보정
     work_df["매체"] = platform_name
-
-    # 타입 정리
     work_df = convert_numeric_columns(work_df, NUMERIC_COLUMNS)
     work_df = convert_date_column(work_df)
-
-    # 최종 컬럼만 남김
     work_df = work_df[FINAL_COLUMNS]
 
     mapping_df = pd.DataFrame(mapping_rows)
@@ -687,6 +701,7 @@ if st.button("통합 리포트 생성", type="primary"):
         # 네이버 디버깅이 필요하면 아래 주석 해제
         # if platform_name == "네이버":
         #     st.write("네이버 읽은 후 컬럼명:", list(raw_df.columns))
+        #     st.dataframe(raw_df.head(5), use_container_width=True)
 
         standardized_df, mapping_df, unmapped_df = standardize_columns(
             df=raw_df,
@@ -698,7 +713,6 @@ if st.button("통합 리포트 생성", type="primary"):
         mapping_summary_list.append(mapping_df)
         unmapped_summary_list.append(unmapped_df)
 
-    # 로드 실패 알림
     if failed_platforms:
         st.warning("파일 읽기에 실패한 매체: " + ", ".join(failed_platforms))
 
