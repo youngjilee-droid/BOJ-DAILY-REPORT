@@ -12,7 +12,7 @@ import streamlit as st
 st.set_page_config(page_title="광고 통합 리포트 & 대시보드", layout="wide")
 
 st.title("광고 통합 리포트 & 대시보드")
-st.write("매체별 RAW 데이터를 업로드하면 통합 리포트 생성과 대시보드 확인을 동시에 할 수 있습니다.")
+st.write("매체별 RAW 데이터를 업로드하면 통합 리포트, 대시보드, 전일/전전일 요약 데이터를 함께 확인할 수 있습니다.")
 
 
 # =========================================================
@@ -157,13 +157,10 @@ KAKAO_COLUMN_MAP = {
     "일자": "날짜",
     "일": "날짜",
     "캠페인": "캠페인명",
-    "캠페인 이름": "캠페인명",
     "캠페인명": "캠페인명",
     "광고그룹": "광고그룹명",
-    "광고그룹 이름": "광고그룹명",
     "광고그룹명": "광고그룹명",
     "광고": "광고명",
-    "소재 이름": "광고명",
     "광고명": "광고명",
     "비용": "비용",
     "광고비": "비용",
@@ -267,9 +264,7 @@ def normalize_for_matching(col_name: str) -> str:
 
 
 def build_normalized_map(column_map: Dict[str, str]) -> Dict[str, str]:
-    return {
-        normalize_for_matching(k): v for k, v in column_map.items()
-    }
+    return {normalize_for_matching(k): v for k, v in column_map.items()}
 
 
 def load_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
@@ -282,12 +277,10 @@ def load_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
             try:
                 buffer = io.BytesIO(file_bytes)
                 buffer.seek(0)
-
                 if sep is None:
                     df = pd.read_csv(buffer, encoding=enc, sep=None, engine="python")
                 else:
                     df = pd.read_csv(buffer, encoding=enc, sep=sep)
-
                 return df
             except Exception:
                 continue
@@ -323,12 +316,10 @@ def load_naver_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
             try:
                 buffer = io.BytesIO(file_bytes)
                 buffer.seek(0)
-
                 if sep is None:
                     df = pd.read_csv(buffer, encoding=enc, sep=None, engine="python", skiprows=1)
                 else:
                     df = pd.read_csv(buffer, encoding=enc, sep=sep, skiprows=1)
-
                 df.columns = [clean_column_name(c) for c in df.columns]
                 df = df.dropna(how="all").reset_index(drop=True)
                 return df
@@ -385,10 +376,6 @@ def convert_date_column(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def add_naver_actual_cost(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    네이버만 실제 비용 = 비용 / 1.1
-    다른 매체는 빈 값 유지
-    """
     df = df.copy()
 
     if "실제 비용" not in df.columns:
@@ -423,7 +410,6 @@ def standardize_columns(df, platform_name, column_map):
     df = convert_numeric_columns(df, NUMERIC_COLUMNS)
     df = convert_date_column(df)
     df = add_naver_actual_cost(df)
-
     return df
 
 
@@ -437,18 +423,6 @@ def to_excel(df):
         df.to_excel(writer, index=False, sheet_name="통합리포트")
     buffer.seek(0)
     return buffer.getvalue()
-
-
-def format_metric_value(value):
-    if pd.isna(value):
-        return "0"
-    try:
-        value = float(value)
-        if value.is_integer():
-            return f"{int(value):,}"
-        return f"{value:,.2f}"
-    except Exception:
-        return str(value)
 
 
 def safe_divide(numerator, denominator):
@@ -515,6 +489,232 @@ def make_campaign_summary(df: pd.DataFrame) -> pd.DataFrame:
     return campaign
 
 
+# =========================================================
+# 5. 데일리 코멘트용 전일 / 전전일 요약 데이터
+# =========================================================
+def get_latest_two_dates(df: pd.DataFrame):
+    valid_dates = (
+        df["날짜_dt"]
+        .dropna()
+        .dt.normalize()
+        .drop_duplicates()
+        .sort_values()
+    )
+
+    if len(valid_dates) == 0:
+        return None, None
+    if len(valid_dates) == 1:
+        return valid_dates.iloc[-1], None
+
+    return valid_dates.iloc[-1], valid_dates.iloc[-2]
+
+
+def make_summary_row(df: pd.DataFrame, target_date: pd.Timestamp, label: str) -> pd.DataFrame:
+    target_df = df[df["날짜_dt"].dt.normalize() == target_date].copy()
+
+    if target_df.empty:
+        return pd.DataFrame()
+
+    cost = target_df["비용"].sum()
+    real_cost = target_df["실제 비용"].sum()
+    impressions = target_df["노출"].sum()
+    clicks = target_df["클릭"].sum()
+    purchases = target_df["구매"].sum()
+    sales = target_df["매출액"].sum()
+    cart = target_df["장바구니담기수"].sum()
+    reach = target_df["도달"].sum()
+    engagement = target_df["참여"].sum()
+    follow = target_df["팔로우"].sum()
+    video_views = target_df["동영상조회"].sum()
+
+    summary = pd.DataFrame([{
+        "구분": label,
+        "날짜": target_date.strftime("%Y-%m-%d"),
+        "비용": cost,
+        "실제 비용": real_cost,
+        "노출": impressions,
+        "클릭": clicks,
+        "CTR": safe_divide(clicks, impressions) * 100,
+        "CPC": safe_divide(cost, clicks),
+        "구매": purchases,
+        "CPA": safe_divide(cost, purchases),
+        "매출액": sales,
+        "ROAS": safe_divide(sales, cost) * 100,
+        "장바구니담기수": cart,
+        "도달": reach,
+        "참여": engagement,
+        "팔로우": follow,
+        "동영상조회": video_views,
+    }])
+    return summary
+
+
+def make_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
+    latest_date, previous_date = get_latest_two_dates(df)
+
+    if latest_date is None:
+        return pd.DataFrame()
+
+    latest_summary = make_summary_row(df, latest_date, "전일")
+    if previous_date is None:
+        return latest_summary
+
+    previous_summary = make_summary_row(df, previous_date, "전전일")
+
+    comparison = pd.concat([latest_summary, previous_summary], ignore_index=True)
+    return comparison
+
+
+def make_media_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
+    latest_date, previous_date = get_latest_two_dates(df)
+
+    if latest_date is None:
+        return pd.DataFrame()
+
+    latest_df = df[df["날짜_dt"].dt.normalize() == latest_date].copy()
+
+    latest_media = (
+        latest_df.groupby("매체", dropna=False)[
+            ["비용", "실제 비용", "노출", "클릭", "구매", "매출액", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"]
+        ]
+        .sum(numeric_only=True)
+        .reset_index()
+    )
+    latest_media["구분"] = "전일"
+    latest_media["날짜"] = latest_date.strftime("%Y-%m-%d")
+    latest_media["CTR"] = latest_media.apply(lambda x: safe_divide(x["클릭"], x["노출"]) * 100, axis=1)
+    latest_media["CPC"] = latest_media.apply(lambda x: safe_divide(x["비용"], x["클릭"]), axis=1)
+    latest_media["CPA"] = latest_media.apply(lambda x: safe_divide(x["비용"], x["구매"]), axis=1)
+    latest_media["ROAS"] = latest_media.apply(lambda x: safe_divide(x["매출액"], x["비용"]) * 100, axis=1)
+
+    if previous_date is None:
+        cols = [
+            "구분", "날짜", "매체", "비용", "실제 비용", "노출", "클릭", "CTR", "CPC",
+            "구매", "CPA", "매출액", "ROAS", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
+        ]
+        return latest_media[cols]
+
+    previous_df = df[df["날짜_dt"].dt.normalize() == previous_date].copy()
+    previous_media = (
+        previous_df.groupby("매체", dropna=False)[
+            ["비용", "실제 비용", "노출", "클릭", "구매", "매출액", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"]
+        ]
+        .sum(numeric_only=True)
+        .reset_index()
+    )
+    previous_media["구분"] = "전전일"
+    previous_media["날짜"] = previous_date.strftime("%Y-%m-%d")
+    previous_media["CTR"] = previous_media.apply(lambda x: safe_divide(x["클릭"], x["노출"]) * 100, axis=1)
+    previous_media["CPC"] = previous_media.apply(lambda x: safe_divide(x["비용"], x["클릭"]), axis=1)
+    previous_media["CPA"] = previous_media.apply(lambda x: safe_divide(x["비용"], x["구매"]), axis=1)
+    previous_media["ROAS"] = previous_media.apply(lambda x: safe_divide(x["매출액"], x["비용"]) * 100, axis=1)
+
+    comparison = pd.concat([latest_media, previous_media], ignore_index=True)
+
+    cols = [
+        "구분", "날짜", "매체", "비용", "실제 비용", "노출", "클릭", "CTR", "CPC",
+        "구매", "CPA", "매출액", "ROAS", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
+    ]
+    return comparison[cols]
+
+
+def make_campaign_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
+    latest_date, previous_date = get_latest_two_dates(df)
+
+    if latest_date is None:
+        return pd.DataFrame()
+
+    latest_df = df[df["날짜_dt"].dt.normalize() == latest_date].copy()
+    latest_campaign = (
+        latest_df.groupby(["매체", "캠페인명"], dropna=False)[
+            ["비용", "실제 비용", "노출", "클릭", "구매", "매출액", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"]
+        ]
+        .sum(numeric_only=True)
+        .reset_index()
+    )
+    latest_campaign["구분"] = "전일"
+    latest_campaign["날짜"] = latest_date.strftime("%Y-%m-%d")
+    latest_campaign["CTR"] = latest_campaign.apply(lambda x: safe_divide(x["클릭"], x["노출"]) * 100, axis=1)
+    latest_campaign["CPC"] = latest_campaign.apply(lambda x: safe_divide(x["비용"], x["클릭"]), axis=1)
+    latest_campaign["CPA"] = latest_campaign.apply(lambda x: safe_divide(x["비용"], x["구매"]), axis=1)
+    latest_campaign["ROAS"] = latest_campaign.apply(lambda x: safe_divide(x["매출액"], x["비용"]) * 100, axis=1)
+
+    if previous_date is None:
+        cols = [
+            "구분", "날짜", "매체", "캠페인명", "비용", "실제 비용", "노출", "클릭", "CTR", "CPC",
+            "구매", "CPA", "매출액", "ROAS", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
+        ]
+        return latest_campaign[cols].sort_values("비용", ascending=False)
+
+    previous_df = df[df["날짜_dt"].dt.normalize() == previous_date].copy()
+    previous_campaign = (
+        previous_df.groupby(["매체", "캠페인명"], dropna=False)[
+            ["비용", "실제 비용", "노출", "클릭", "구매", "매출액", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"]
+        ]
+        .sum(numeric_only=True)
+        .reset_index()
+    )
+    previous_campaign["구분"] = "전전일"
+    previous_campaign["날짜"] = previous_date.strftime("%Y-%m-%d")
+    previous_campaign["CTR"] = previous_campaign.apply(lambda x: safe_divide(x["클릭"], x["노출"]) * 100, axis=1)
+    previous_campaign["CPC"] = previous_campaign.apply(lambda x: safe_divide(x["비용"], x["클릭"]), axis=1)
+    previous_campaign["CPA"] = previous_campaign.apply(lambda x: safe_divide(x["비용"], x["구매"]), axis=1)
+    previous_campaign["ROAS"] = previous_campaign.apply(lambda x: safe_divide(x["매출액"], x["비용"]) * 100, axis=1)
+
+    comparison = pd.concat([latest_campaign, previous_campaign], ignore_index=True)
+
+    cols = [
+        "구분", "날짜", "매체", "캠페인명", "비용", "실제 비용", "노출", "클릭", "CTR", "CPC",
+        "구매", "CPA", "매출액", "ROAS", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
+    ]
+    return comparison[cols].sort_values(["구분", "비용"], ascending=[True, False])
+
+
+def render_comment_data_section(df: pd.DataFrame):
+    st.subheader("데일리 코멘트용 전일 / 전전일 요약 데이터")
+
+    comparison_summary = make_comparison_summary(df)
+    media_comparison_summary = make_media_comparison_summary(df)
+    campaign_comparison_summary = make_campaign_comparison_summary(df)
+
+    if comparison_summary.empty:
+        st.warning("전일/전전일 요약 데이터를 만들 수 없습니다.")
+        return
+
+    st.markdown("### 1) 전체 요약")
+    st.dataframe(comparison_summary, use_container_width=True)
+
+    st.download_button(
+        "전체 요약 CSV 다운로드",
+        to_csv(comparison_summary),
+        "daily_comment_total_summary.csv",
+        mime="text/csv",
+    )
+
+    st.markdown("### 2) 매체별 요약")
+    st.dataframe(media_comparison_summary, use_container_width=True)
+
+    st.download_button(
+        "매체별 요약 CSV 다운로드",
+        to_csv(media_comparison_summary),
+        "daily_comment_media_summary.csv",
+        mime="text/csv",
+    )
+
+    st.markdown("### 3) 캠페인별 요약")
+    st.dataframe(campaign_comparison_summary, use_container_width=True)
+
+    st.download_button(
+        "캠페인별 요약 CSV 다운로드",
+        to_csv(campaign_comparison_summary),
+        "daily_comment_campaign_summary.csv",
+        mime="text/csv",
+    )
+
+
+# =========================================================
+# 6. 대시보드 렌더링
+# =========================================================
 def render_dashboard(df: pd.DataFrame):
     dashboard_df = build_dashboard_df(df)
 
@@ -533,15 +733,16 @@ def render_dashboard(df: pd.DataFrame):
                 value=(min_date, max_date),
                 min_value=min_date,
                 max_value=max_date,
+                key="dashboard_date_range",
             )
         else:
             selected_dates = None
 
         media_options = sorted([m for m in dashboard_df["매체"].dropna().unique().tolist() if str(m).strip() != ""])
-        selected_media = st.multiselect("매체 선택", media_options, default=media_options)
+        selected_media = st.multiselect("매체 선택", media_options, default=media_options, key="dashboard_media")
 
         campaign_options = sorted([c for c in dashboard_df["캠페인명"].dropna().unique().tolist() if str(c).strip() != ""])
-        selected_campaigns = st.multiselect("캠페인 선택", campaign_options, default=campaign_options)
+        selected_campaigns = st.multiselect("캠페인 선택", campaign_options, default=campaign_options, key="dashboard_campaign")
 
     filtered_df = dashboard_df.copy()
 
@@ -575,22 +776,22 @@ def render_dashboard(df: pd.DataFrame):
     roas = safe_divide(total_sales, total_cost) * 100
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("총 비용", format_metric_value(total_cost))
-    m2.metric("총 실제 비용", format_metric_value(total_real_cost))
-    m3.metric("총 매출액", format_metric_value(total_sales))
+    m1.metric("총 비용", f"{total_cost:,.0f}")
+    m2.metric("총 실제 비용", f"{total_real_cost:,.0f}")
+    m3.metric("총 매출액", f"{total_sales:,.0f}")
     m4.metric("ROAS", f"{roas:,.2f}%")
 
     m5, m6, m7, m8 = st.columns(4)
-    m5.metric("총 노출", format_metric_value(total_impressions))
-    m6.metric("총 클릭", format_metric_value(total_clicks))
+    m5.metric("총 노출", f"{total_impressions:,.0f}")
+    m6.metric("총 클릭", f"{total_clicks:,.0f}")
     m7.metric("CTR", f"{ctr:,.2f}%")
     m8.metric("CPC", f"{cpc:,.2f}")
 
     m9, m10, m11, m12 = st.columns(4)
-    m9.metric("총 구매", format_metric_value(total_purchases))
+    m9.metric("총 구매", f"{total_purchases:,.0f}")
     m10.metric("CPA", f"{cpa:,.2f}")
-    m11.metric("장바구니 담기", format_metric_value(filtered_df["장바구니담기수"].sum()))
-    m12.metric("도달", format_metric_value(filtered_df["도달"].sum()))
+    m11.metric("장바구니 담기", f"{filtered_df['장바구니담기수'].sum():,.0f}")
+    m12.metric("도달", f"{filtered_df['도달'].sum():,.0f}")
 
     st.markdown("---")
 
@@ -630,9 +831,9 @@ def render_dashboard(df: pd.DataFrame):
 
 
 # =========================================================
-# 5. UI
+# 7. UI
 # =========================================================
-tab1, tab2 = st.tabs(["리포트 생성기", "대시보드"])
+tab1, tab2, tab3 = st.tabs(["리포트 생성기", "대시보드", "데일리 코멘트용 데이터"])
 
 with tab1:
     st.markdown("### 매체별 RAW 업로드")
@@ -696,5 +897,12 @@ with tab1:
 with tab2:
     if "final_report_df" in st.session_state and not st.session_state["final_report_df"].empty:
         render_dashboard(st.session_state["final_report_df"])
+    else:
+        st.info("먼저 '리포트 생성기' 탭에서 통합 리포트를 생성해 주세요.")
+
+with tab3:
+    if "final_report_df" in st.session_state and not st.session_state["final_report_df"].empty:
+        comment_df = build_dashboard_df(st.session_state["final_report_df"])
+        render_comment_data_section(comment_df)
     else:
         st.info("먼저 '리포트 생성기' 탭에서 통합 리포트를 생성해 주세요.")
