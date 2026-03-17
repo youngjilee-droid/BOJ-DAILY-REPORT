@@ -60,23 +60,29 @@ NUMERIC_COLUMNS = [
 NAVER_COLUMN_MAP = {
     "일별": "날짜",
     "일자": "날짜",
+    "날짜": "날짜",
     "캠페인": "캠페인명",
     "캠페인명": "캠페인명",
     "광고그룹": "광고그룹명",
     "광고그룹명": "광고그룹명",
     "소재": "광고명",
+    "광고": "광고명",
     "광고명": "광고명",
     "총비용(VAT포함,원)": "비용",
+    "총비용": "비용",
     "광고비": "비용",
     "소진액": "비용",
+    "비용": "비용",
     "노출": "노출",
     "노출수": "노출",
     "클릭": "클릭",
     "클릭수": "클릭",
     "총 전환수": "구매",
+    "총전환수": "구매",
     "구매수": "구매",
     "전환구매": "구매",
     "총 전환매출액(원)": "매출액",
+    "총전환매출액(원)": "매출액",
     "매출액": "매출액",
     "구매액": "매출액",
     "장바구니": "장바구니담기수",
@@ -145,7 +151,6 @@ META_COLUMN_MAP = {
     "video plays": "동영상조회",
     "video views": "동영상조회",
     "thruplays": "동영상조회",
-    "동영상 3초 이상 재생": "동영상조회",
     "3-second video plays": "동영상조회",
 }
 
@@ -193,43 +198,42 @@ KAKAO_COLUMN_MAP = {
 
 TIKTOK_COLUMN_MAP = {
     "date": "날짜",
-    "By day": "날짜",
+    "by day": "날짜",
     "stat_time_day": "날짜",
     "날짜": "날짜",
-    "Campaign name": "캠페인명",
+    "campaign name": "캠페인명",
     "campaign": "캠페인명",
-    "Ad group name": "광고그룹명",
+    "ad group name": "광고그룹명",
     "adgroup name": "광고그룹명",
     "ad group": "광고그룹명",
-    "Ad name": "광고명",
+    "ad name": "광고명",
     "ad": "광고명",
     "spend": "비용",
-    "Cost": "비용",
+    "cost": "비용",
     "amount spent": "비용",
     "지출 금액": "비용",
     "노출": "노출",
-    "Impressions": "노출",
-    "Clicks (destination)": "클릭",
+    "impressions": "노출",
+    "clicks (destination)": "클릭",
     "clicks": "클릭",
     "클릭": "클릭",
-    "Total purchase (all-channels)": "구매",
+    "total purchase (all-channels)": "구매",
     "purchase": "구매",
     "purchases": "구매",
     "complete payment": "구매",
     "purchase value": "매출액",
-    "Total purchase (all-channels)": "매출액",
     "complete payment value": "매출액",
     "conversion value": "매출액",
     "add to cart": "장바구니담기수",
-    "Total add to cart (all-channels)": "장바구니담기수",
+    "total add to cart (all-channels)": "장바구니담기수",
     "adds to cart": "장바구니담기수",
-    "Reach": "도달",
+    "reach": "도달",
     "도달": "도달",
     "engagement": "참여",
     "engaged view": "참여",
     "follows": "팔로우",
     "followers": "팔로우",
-    "Video views": "동영상조회",
+    "video views": "동영상조회",
     "video views at 2s": "동영상조회",
     "video views at 6s": "동영상조회",
     "동영상 조회": "동영상조회",
@@ -283,13 +287,52 @@ def build_normalized_map(column_map: Dict[str, str]) -> Dict[str, str]:
     return normalized_map
 
 
+def detect_header_row(df_preview: pd.DataFrame, min_match: int = 2) -> int:
+    """
+    실제 헤더로 보이는 행 번호를 찾는다.
+    네이버처럼 상단 제목/설명 행이 있는 파일을 처리하기 위한 함수
+    """
+    header_keywords = [
+        "날짜", "일자", "일별",
+        "캠페인", "캠페인명",
+        "광고그룹", "광고그룹명",
+        "광고", "광고명", "소재",
+        "비용", "광고비", "소진액", "총비용",
+        "노출", "클릭", "구매", "전환", "매출",
+        "장바구니", "도달", "참여", "팔로우", "동영상"
+    ]
+
+    best_row_idx = 0
+    best_score = -1
+
+    max_rows = min(len(df_preview), 10)
+
+    for i in range(max_rows):
+        row_values = df_preview.iloc[i].fillna("").astype(str).tolist()
+        joined = " ".join(row_values)
+
+        score = 0
+        for keyword in header_keywords:
+            if keyword in joined:
+                score += 1
+
+        if score > best_score:
+            best_score = score
+            best_row_idx = i
+
+    if best_score >= min_match:
+        return best_row_idx
+
+    return 0
+
+
 def is_unnamed_column(col_name: str) -> bool:
     return clean_column_name(col_name).lower().startswith("unnamed:")
 
 
 def load_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
     """
-    CSV 파일 로드
+    일반 CSV 파일 로드
     - 여러 인코딩 시도
     - 여러 구분자 시도
     """
@@ -321,7 +364,7 @@ def load_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
 
 def load_excel_file(uploaded_file) -> Optional[pd.DataFrame]:
     """
-    XLSX 파일 로드
+    일반 XLSX 파일 로드
     """
     try:
         uploaded_file.seek(0)
@@ -331,21 +374,107 @@ def load_excel_file(uploaded_file) -> Optional[pd.DataFrame]:
         return None
 
 
+def load_naver_excel_file(uploaded_file) -> Optional[pd.DataFrame]:
+    """
+    네이버 XLSX 전용 로드
+    - 먼저 header=None으로 읽고
+    - 실제 헤더 행을 자동 탐지해서 컬럼 설정
+    """
+    try:
+        uploaded_file.seek(0)
+        raw_df = pd.read_excel(uploaded_file, engine="openpyxl", header=None)
+
+        if raw_df is None or raw_df.empty:
+            return None
+
+        header_row = detect_header_row(raw_df)
+
+        df = raw_df.iloc[header_row + 1:].copy()
+        df.columns = raw_df.iloc[header_row].fillna("").astype(str).tolist()
+        df = df.reset_index(drop=True)
+
+        return df
+
+    except Exception:
+        return None
+
+
+def load_naver_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
+    """
+    네이버 CSV 전용 로드
+    - 여러 인코딩/구분자 시도
+    - header=None으로 먼저 읽고 실제 헤더 행 탐지
+    """
+    encodings = ["utf-8-sig", "utf-8", "cp949", "euc-kr", "utf-16"]
+    separators = [None, ",", "\t", ";", "|"]
+
+    file_bytes = uploaded_file.getvalue()
+    if not file_bytes:
+        return None
+
+    for encoding in encodings:
+        for sep in separators:
+            try:
+                buffer = io.BytesIO(file_bytes)
+                buffer.seek(0)
+
+                if sep is None:
+                    raw_df = pd.read_csv(
+                        buffer,
+                        encoding=encoding,
+                        sep=None,
+                        engine="python",
+                        header=None
+                    )
+                else:
+                    raw_df = pd.read_csv(
+                        buffer,
+                        encoding=encoding,
+                        sep=sep,
+                        header=None
+                    )
+
+                if raw_df is None or raw_df.empty:
+                    continue
+
+                header_row = detect_header_row(raw_df)
+
+                df = raw_df.iloc[header_row + 1:].copy()
+                df.columns = raw_df.iloc[header_row].fillna("").astype(str).tolist()
+                df = df.reset_index(drop=True)
+
+                return df
+
+            except Exception:
+                continue
+
+    return None
+
+
 def load_file(uploaded_file, platform_name: str) -> Optional[pd.DataFrame]:
     """
     업로드 파일 로드 후 매체 컬럼 추가
+    - 네이버는 헤더 자동 탐지 방식 사용
     """
     if uploaded_file is None:
         return None
 
     file_name = uploaded_file.name.lower()
 
-    if file_name.endswith(".csv"):
-        df = load_csv_file(uploaded_file)
-    elif file_name.endswith(".xlsx"):
-        df = load_excel_file(uploaded_file)
+    if platform_name == "네이버":
+        if file_name.endswith(".csv"):
+            df = load_naver_csv_file(uploaded_file)
+        elif file_name.endswith(".xlsx"):
+            df = load_naver_excel_file(uploaded_file)
+        else:
+            return None
     else:
-        return None
+        if file_name.endswith(".csv"):
+            df = load_csv_file(uploaded_file)
+        elif file_name.endswith(".xlsx"):
+            df = load_excel_file(uploaded_file)
+        else:
+            return None
 
     if df is None:
         return None
@@ -554,6 +683,10 @@ if st.button("통합 리포트 생성", type="primary"):
         if raw_df is None:
             failed_platforms.append(platform_name)
             continue
+
+        # 네이버 디버깅이 필요하면 아래 주석 해제
+        # if platform_name == "네이버":
+        #     st.write("네이버 읽은 후 컬럼명:", list(raw_df.columns))
 
         standardized_df, mapping_df, unmapped_df = standardize_columns(
             df=raw_df,
