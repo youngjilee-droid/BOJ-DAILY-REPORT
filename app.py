@@ -12,7 +12,7 @@ import streamlit as st
 st.set_page_config(page_title="광고 통합 리포트 & 대시보드", layout="wide")
 
 st.title("광고 통합 리포트 & 대시보드")
-st.write("매체별 RAW 데이터를 업로드하면 통합 리포트, 대시보드, 전일/전전일 요약 데이터를 함께 확인할 수 있습니다.")
+st.write("매체별 RAW 데이터를 업로드하면 통합 리포트, 대시보드, 전일/전전일 요약, 룰 기반 데일리 코멘트를 함께 확인할 수 있습니다.")
 
 
 # =========================================================
@@ -420,10 +420,10 @@ def to_csv(df):
     return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
 
 
-def to_excel(df):
+def to_excel(df, sheet_name="통합리포트"):
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="통합리포트")
+        df.to_excel(writer, index=False, sheet_name=sheet_name)
     buffer.seek(0)
     return buffer.getvalue()
 
@@ -493,7 +493,7 @@ def make_campaign_summary(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # =========================================================
-# 5. 데일리 코멘트용 전일 / 전전일 요약 데이터
+# 5. 전일 / 전전일 요약 데이터
 # =========================================================
 def get_latest_two_dates(df: pd.DataFrame):
     valid_dates = (
@@ -563,7 +563,6 @@ def make_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
         return latest_summary
 
     previous_summary = make_summary_row(df, previous_date, "전전일")
-
     comparison = pd.concat([latest_summary, previous_summary], ignore_index=True)
     return comparison
 
@@ -575,7 +574,6 @@ def make_media_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     latest_df = df[df["날짜_dt"].dt.normalize() == latest_date].copy()
-
     latest_media = (
         latest_df.groupby("매체", dropna=False)[
             ["비용", "실제 비용", "노출", "클릭", "구매", "매출액", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"]
@@ -673,6 +671,164 @@ def make_campaign_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
     return comparison[cols].sort_values(["구분", "비용"], ascending=[True, False])
 
 
+# =========================================================
+# 6. 룰 기반 데일리 코멘트
+# =========================================================
+def pct_change(curr, prev):
+    if prev in [0, None] or pd.isna(prev):
+        if curr in [0, None] or pd.isna(curr):
+            return 0
+        return None
+    return ((curr - prev) / prev) * 100
+
+
+def change_word(value, up_word="증가", down_word="감소", flat_word="유사"):
+    if value is None:
+        return "비교불가"
+    if value > 0.5:
+        return up_word
+    if value < -0.5:
+        return down_word
+    return flat_word
+
+
+def metric_sentence(label, curr, prev, unit="", prefer_rate=True):
+    diff = pct_change(curr, prev)
+    word = change_word(diff)
+    curr_text = f"{curr:,.0f}" if pd.notna(curr) else "0"
+
+    if diff is None:
+        return f"{label}은(는) {curr_text}{unit}로 집계되었으며 비교 기준 데이터가 부족합니다."
+
+    if not prefer_rate:
+        return f"{label}은(는) 전전일 대비 {word}하여 {curr_text}{unit}입니다."
+
+    return f"{label}은(는) 전전일 대비 {word}하여 {curr_text}{unit}이며 증감률은 {diff:+.1f}%입니다."
+
+
+def get_top_media_insight(media_df: pd.DataFrame) -> str:
+    if media_df.empty:
+        return "매체별 비교 데이터가 부족합니다."
+
+    latest = media_df[media_df["구분"] == "전일"].copy()
+    prev = media_df[media_df["구분"] == "전전일"].copy()
+
+    if latest.empty:
+        return "전일 매체 데이터가 없습니다."
+
+    top_cost_row = latest.sort_values("비용", ascending=False).iloc[0]
+    cost_media = top_cost_row["매체"]
+
+    prev_match = prev[prev["매체"] == cost_media]
+    prev_roas = prev_match["ROAS"].iloc[0] if not prev_match.empty else None
+    curr_roas = top_cost_row["ROAS"]
+    roas_diff = pct_change(curr_roas, prev_roas)
+    roas_word = change_word(roas_diff, up_word="개선", down_word="하락", flat_word="유사")
+
+    return f"비용 비중이 가장 큰 매체는 {cost_media}이며, 해당 매체의 ROAS는 전전일 대비 {roas_word} 흐름을 보였습니다."
+
+
+def get_best_roas_media_insight(media_df: pd.DataFrame) -> str:
+    if media_df.empty:
+        return "매체별 ROAS 비교 데이터가 부족합니다."
+
+    latest = media_df[media_df["구분"] == "전일"].copy()
+    latest = latest[latest["비용"] > 0]
+
+    if latest.empty:
+        return "ROAS 계산이 가능한 전일 매체 데이터가 없습니다."
+
+    best_row = latest.sort_values("ROAS", ascending=False).iloc[0]
+    return f"전일 기준 ROAS가 가장 높은 매체는 {best_row['매체']}이며, ROAS는 {best_row['ROAS']:.1f}%입니다."
+
+
+def get_campaign_insight(campaign_df: pd.DataFrame) -> str:
+    if campaign_df.empty:
+        return "캠페인 비교 데이터가 부족합니다."
+
+    latest = campaign_df[campaign_df["구분"] == "전일"].copy()
+    latest = latest[latest["비용"] > 0]
+
+    if latest.empty:
+        return "전일 캠페인 데이터가 없습니다."
+
+    top_campaign = latest.sort_values("매출액", ascending=False).iloc[0]
+    return f"전일 매출액 기준 상위 캠페인은 {top_campaign['매체']}의 {top_campaign['캠페인명']}이며, 매출액은 {top_campaign['매출액']:,.0f}입니다."
+
+
+def generate_rule_based_comment(total_df: pd.DataFrame, media_df: pd.DataFrame, campaign_df: pd.DataFrame) -> str:
+    if total_df.empty:
+        return "전일/전전일 비교 데이터가 없어 데일리 코멘트를 생성할 수 없습니다."
+
+    latest = total_df[total_df["구분"] == "전일"]
+    previous = total_df[total_df["구분"] == "전전일"]
+
+    if latest.empty:
+        return "전일 데이터가 없어 데일리 코멘트를 생성할 수 없습니다."
+
+    latest_row = latest.iloc[0]
+
+    if previous.empty:
+        return (
+            f"전일 데이터는 {latest_row['날짜']} 기준으로 집계되었습니다. "
+            f"총 비용은 {latest_row['비용']:,.0f}, 매출액은 {latest_row['매출액']:,.0f}, "
+            f"ROAS는 {latest_row['ROAS']:.1f}%입니다. "
+            f"전전일 데이터가 없어 증감 비교는 제외했습니다."
+        )
+
+    prev_row = previous.iloc[0]
+
+    intro_cost = metric_sentence("총 비용", latest_row["비용"], prev_row["비용"], unit="", prefer_rate=True)
+    intro_sales = metric_sentence("매출액", latest_row["매출액"], prev_row["매출액"], unit="", prefer_rate=True)
+
+    roas_diff = pct_change(latest_row["ROAS"], prev_row["ROAS"])
+    roas_word = change_word(roas_diff, up_word="개선", down_word="하락", flat_word="유사")
+    roas_sentence = f"ROAS는 전전일 대비 {roas_word}되어 {latest_row['ROAS']:.1f}%입니다."
+
+    purchase_diff = pct_change(latest_row["구매"], prev_row["구매"])
+    purchase_word = change_word(purchase_diff)
+    purchase_sentence = f"구매수는 전전일 대비 {purchase_word}하여 {latest_row['구매']:,.0f}건입니다."
+
+    media_sentence = get_top_media_insight(media_df)
+    best_media_sentence = get_best_roas_media_insight(media_df)
+    campaign_sentence = get_campaign_insight(campaign_df)
+
+    comments = [
+        f"전일({latest_row['날짜']}) 기준 전체 성과를 보면, {intro_cost}",
+        f"{intro_sales} {roas_sentence}",
+        f"{purchase_sentence} {media_sentence}",
+        f"{best_media_sentence} {campaign_sentence}",
+    ]
+
+    return "\n\n".join(comments)
+
+
+def render_daily_comment_section(df: pd.DataFrame):
+    st.subheader("룰 기반 데일리 코멘트")
+
+    total_summary = make_comparison_summary(df)
+    media_summary = make_media_comparison_summary(df)
+    campaign_summary = make_campaign_comparison_summary(df)
+
+    comment = generate_rule_based_comment(total_summary, media_summary, campaign_summary)
+
+    st.text_area(
+        "데일리 코멘트 결과",
+        value=comment,
+        height=260,
+    )
+
+    st.download_button(
+        "데일리 코멘트 TXT 다운로드",
+        data=comment.encode("utf-8"),
+        file_name="daily_comment.txt",
+        mime="text/plain",
+    )
+
+
+# =========================================================
+# 7. 대시보드 / 데이터 표시
+# =========================================================
 def render_comment_data_section(df: pd.DataFrame):
     st.subheader("데일리 코멘트용 전일 / 전전일 요약 데이터")
 
@@ -686,7 +842,6 @@ def render_comment_data_section(df: pd.DataFrame):
 
     st.markdown("### 1) 전체 요약")
     st.dataframe(comparison_summary, use_container_width=True)
-
     st.download_button(
         "전체 요약 CSV 다운로드",
         to_csv(comparison_summary),
@@ -696,7 +851,6 @@ def render_comment_data_section(df: pd.DataFrame):
 
     st.markdown("### 2) 매체별 요약")
     st.dataframe(media_comparison_summary, use_container_width=True)
-
     st.download_button(
         "매체별 요약 CSV 다운로드",
         to_csv(media_comparison_summary),
@@ -706,7 +860,6 @@ def render_comment_data_section(df: pd.DataFrame):
 
     st.markdown("### 3) 캠페인별 요약")
     st.dataframe(campaign_comparison_summary, use_container_width=True)
-
     st.download_button(
         "캠페인별 요약 CSV 다운로드",
         to_csv(campaign_comparison_summary),
@@ -715,9 +868,6 @@ def render_comment_data_section(df: pd.DataFrame):
     )
 
 
-# =========================================================
-# 6. 대시보드 렌더링
-# =========================================================
 def render_dashboard(df: pd.DataFrame):
     dashboard_df = build_dashboard_df(df)
 
@@ -834,9 +984,14 @@ def render_dashboard(df: pd.DataFrame):
 
 
 # =========================================================
-# 7. UI
+# 8. UI
 # =========================================================
-tab1, tab2, tab3 = st.tabs(["리포트 생성기", "대시보드", "데일리 코멘트용 데이터"])
+tab1, tab2, tab3, tab4 = st.tabs([
+    "리포트 생성기",
+    "대시보드",
+    "데일리 코멘트용 데이터",
+    "룰 기반 데일리 코멘트",
+])
 
 with tab1:
     st.markdown("### 매체별 RAW 업로드")
@@ -890,7 +1045,7 @@ with tab1:
             )
             st.download_button(
                 "엑셀 다운로드",
-                to_excel(final),
+                to_excel(final, sheet_name="통합리포트"),
                 "report.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
@@ -907,5 +1062,12 @@ with tab3:
     if "final_report_df" in st.session_state and not st.session_state["final_report_df"].empty:
         comment_df = build_dashboard_df(st.session_state["final_report_df"])
         render_comment_data_section(comment_df)
+    else:
+        st.info("먼저 '리포트 생성기' 탭에서 통합 리포트를 생성해 주세요.")
+
+with tab4:
+    if "final_report_df" in st.session_state and not st.session_state["final_report_df"].empty:
+        comment_df = build_dashboard_df(st.session_state["final_report_df"])
+        render_daily_comment_section(comment_df)
     else:
         st.info("먼저 '리포트 생성기' 탭에서 통합 리포트를 생성해 주세요.")
