@@ -1,6 +1,6 @@
 import io
 import re
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
 
 import pandas as pd
 import streamlit as st
@@ -24,6 +24,7 @@ FINAL_COLUMNS = [
     "광고그룹명",
     "광고명",
     "비용",
+    "실제 비용",
     "노출",
     "클릭",
     "구매",
@@ -38,6 +39,7 @@ FINAL_COLUMNS = [
 
 NUMERIC_COLUMNS = [
     "비용",
+    "실제 비용",
     "노출",
     "클릭",
     "구매",
@@ -97,143 +99,144 @@ NAVER_COLUMN_MAP = {
 }
 
 META_COLUMN_MAP = {
-"일": "날짜", 
-"날짜": "날짜",
-"date": "날짜",
-"day": "날짜",
-"캠페인 이름": "캠페인명",
-"campaign name": "캠페인명",
-"campaign": "캠페인명",
-"광고 세트 이름": "광고그룹명", 
-"ad set name": "광고그룹명",
-"adset name": "광고그룹명",
-"광고 이름": "광고명",
-"ad name": "광고명",
-"ad": "광고명",
-"지출 금액": "비용",
-"지출 금액 (krw)": "비용",
-"amount spent": "비용",
-"spend": "비용",
-"노출": "노출",
-"impressions": "노출",
-"링크 클릭": "클릭",
-"클릭": "클릭",
-"clicks": "클릭",
-"구매": "구매",
-"purchases": "구매",
-"공유 항목이 포함된 구매": "구매",
-"website purchases": "구매",
-"meta purchases": "구매",
-"구매 전환값": "매출액",
-"공유 항목의 구매 전환값": "매출액",
-"purchase conversion value": "매출액",
-"website purchase conversion value": "매출액",
-"conversion value": "매출액",
-"공유 항목이 포함된 장바구니에 담기": "장바구니담기수",
-"장바구니에 담기": "장바구니담기수",
-"adds to cart": "장바구니담기수",
-"add to cart": "장바구니담기수",
-"도달": "도달", "reach": "도달",
-"참여": "참여",
-"post engagement": "참여",
-"engagement": "참여",
-"게시물 참여": "참여",
-"팔로우": "팔로우",
-"follows": "팔로우",
-"instagram profile follows": "팔로우",
-"동영상 3초 이상 재생": "동영상조회",
-"동영상 조회": "동영상조회",
-"video plays": "동영상조회",
-"video views": "동영상조회", 
-"thruplays": "동영상조회",
-"동영상 3초 이상 재생": "동영상조회",
-"3-second video plays": "동영상조회",
+    "일": "날짜",
+    "날짜": "날짜",
+    "date": "날짜",
+    "day": "날짜",
+    "캠페인 이름": "캠페인명",
+    "campaign name": "캠페인명",
+    "campaign": "캠페인명",
+    "광고 세트 이름": "광고그룹명",
+    "ad set name": "광고그룹명",
+    "adset name": "광고그룹명",
+    "광고 이름": "광고명",
+    "ad name": "광고명",
+    "ad": "광고명",
+    "지출 금액": "비용",
+    "지출 금액 (krw)": "비용",
+    "amount spent": "비용",
+    "spend": "비용",
+    "노출": "노출",
+    "impressions": "노출",
+    "링크 클릭": "클릭",
+    "클릭": "클릭",
+    "clicks": "클릭",
+    "구매": "구매",
+    "purchases": "구매",
+    "공유 항목이 포함된 구매": "구매",
+    "website purchases": "구매",
+    "meta purchases": "구매",
+    "구매 전환값": "매출액",
+    "공유 항목의 구매 전환값": "매출액",
+    "purchase conversion value": "매출액",
+    "website purchase conversion value": "매출액",
+    "conversion value": "매출액",
+    "공유 항목이 포함된 장바구니에 담기": "장바구니담기수",
+    "장바구니에 담기": "장바구니담기수",
+    "adds to cart": "장바구니담기수",
+    "add to cart": "장바구니담기수",
+    "도달": "도달",
+    "reach": "도달",
+    "참여": "참여",
+    "post engagement": "참여",
+    "engagement": "참여",
+    "게시물 참여": "참여",
+    "팔로우": "팔로우",
+    "follows": "팔로우",
+    "instagram profile follows": "팔로우",
+    "동영상 3초 이상 재생": "동영상조회",
+    "동영상 조회": "동영상조회",
+    "video plays": "동영상조회",
+    "video views": "동영상조회",
+    "thruplays": "동영상조회",
+    "동영상 3초 이상 재생": "동영상조회",
+    "3-second video plays": "동영상조회",
 }
 
 KAKAO_COLUMN_MAP = {
-"날짜": "날짜",
-"일자": "날짜",
-"일": "날짜",
-"캠페인": "캠페인명",
-"캠페인명": "캠페인명",
-"광고그룹": "광고그룹명",
-"광고그룹명": "광고그룹명",
-"광고": "광고명",
-"광고명": "광고명",
-"비용": "비용",
-"광고비": "비용",
-"소진액": "비용",
-"사용금액": "비용",
-"노출": "노출",
-"노출수": "노출",
-"클릭": "클릭",
-"클릭수": "클릭",
-"구매": "구매",
-"구매 (7일)": "구매",
-"구매수": "구매",
-"전환": "구매",
-"매출": "매출액",
-"구매금액 (7일)": "매출액",
-"매출액": "매출액",
-"구매금액": "매출액",
-"장바구니추가(7일)": "장바구니담기수",
-"장바구니담기": "장바구니담기수",
-"장바구니담기수": "장바구니담기수",
-"장바구니": "장바구니담기수",
-"도달": "도달",
-"도달수": "도달",
-"참여": "참여",
-"참여수": "참여",
-"팔로우": "팔로우",
-"팔로우수": "팔로우",
-"동영상조회": "동영상조회",
-"동영상 조회": "동영상조회",
-"영상조회": "동영상조회",
-"동영상 재생": "동영상조회",
+    "날짜": "날짜",
+    "일자": "날짜",
+    "일": "날짜",
+    "캠페인": "캠페인명",
+    "캠페인명": "캠페인명",
+    "광고그룹": "광고그룹명",
+    "광고그룹명": "광고그룹명",
+    "광고": "광고명",
+    "광고명": "광고명",
+    "비용": "비용",
+    "광고비": "비용",
+    "소진액": "비용",
+    "사용금액": "비용",
+    "노출": "노출",
+    "노출수": "노출",
+    "클릭": "클릭",
+    "클릭수": "클릭",
+    "구매": "구매",
+    "구매 (7일)": "구매",
+    "구매수": "구매",
+    "전환": "구매",
+    "매출": "매출액",
+    "구매금액 (7일)": "매출액",
+    "매출액": "매출액",
+    "구매금액": "매출액",
+    "장바구니추가(7일)": "장바구니담기수",
+    "장바구니담기": "장바구니담기수",
+    "장바구니담기수": "장바구니담기수",
+    "장바구니": "장바구니담기수",
+    "도달": "도달",
+    "도달수": "도달",
+    "참여": "참여",
+    "참여수": "참여",
+    "팔로우": "팔로우",
+    "팔로우수": "팔로우",
+    "동영상조회": "동영상조회",
+    "동영상 조회": "동영상조회",
+    "영상조회": "동영상조회",
+    "동영상 재생": "동영상조회",
 }
 
 TIKTOK_COLUMN_MAP = {
-"date": "날짜",
-"By day": "날짜",
-"stat_time_day": "날짜",
-"날짜": "날짜",
-"Campaign name": "캠페인명",
-"campaign": "캠페인명",
-"Ad group name": "광고그룹명",
-"adgroup name": "광고그룹명",
-"ad group": "광고그룹명",
-"Ad name": "광고명",
-"ad": "광고명",
-"spend": "비용",
-"Cost": "비용",
-"amount spent": "비용",
-"지출 금액": "비용",
-"노출": "노출",
-"Impressions": "노출",
-"Clicks (destination)": "클릭",
-"clicks": "클릭",
-"클릭": "클릭",
-"Total purchase (all-channels)": "구매",
-"purchase": "구매",
-"purchases": "구매",
-"complete payment": "구매",
-"purchase value": "매출액",
-"Total purchase (all-channels)": "매출액",
-"complete payment value": "매출액",
-"conversion value": "매출액", 
-"add to cart": "장바구니담기수",
-"Total add to cart (all-channels)": "장바구니담기수",
-"adds to cart": "장바구니담기수",
-"Reach": "도달",
-"도달": "도달",
-"engagement": "참여",
-"engaged view": "참여",
-"follows": "팔로우",
-"followers": "팔로우",
-"Video views": "동영상조회",
-"video views at 2s": "동영상조회",
-"video views at 6s": "동영상조회",
-"동영상 조회": "동영상조회",
+    "date": "날짜",
+    "By day": "날짜",
+    "stat_time_day": "날짜",
+    "날짜": "날짜",
+    "Campaign name": "캠페인명",
+    "campaign": "캠페인명",
+    "Ad group name": "광고그룹명",
+    "adgroup name": "광고그룹명",
+    "ad group": "광고그룹명",
+    "Ad name": "광고명",
+    "ad": "광고명",
+    "spend": "비용",
+    "Cost": "비용",
+    "amount spent": "비용",
+    "지출 금액": "비용",
+    "노출": "노출",
+    "Impressions": "노출",
+    "Clicks (destination)": "클릭",
+    "clicks": "클릭",
+    "클릭": "클릭",
+    "Total purchase (all-channels)": "구매",
+    "purchase": "구매",
+    "purchases": "구매",
+    "complete payment": "구매",
+    "purchase value": "매출액",
+    "Total purchase (all-channels)": "매출액",
+    "complete payment value": "매출액",
+    "conversion value": "매출액",
+    "add to cart": "장바구니담기수",
+    "Total add to cart (all-channels)": "장바구니담기수",
+    "adds to cart": "장바구니담기수",
+    "Reach": "도달",
+    "도달": "도달",
+    "engagement": "참여",
+    "engaged view": "참여",
+    "follows": "팔로우",
+    "followers": "팔로우",
+    "Video views": "동영상조회",
+    "video views at 2s": "동영상조회",
+    "video views at 6s": "동영상조회",
+    "동영상 조회": "동영상조회",
 }
 
 PLATFORM_MAPS = {
@@ -299,7 +302,7 @@ def load_excel_file(uploaded_file) -> Optional[pd.DataFrame]:
         return None
 
 
-# 🔥 핵심: 네이버는 무조건 첫 줄 제거
+# 네이버는 첫 줄 제거
 def load_naver_excel_file(uploaded_file) -> Optional[pd.DataFrame]:
     try:
         uploaded_file.seek(0)
@@ -360,6 +363,39 @@ def load_file(uploaded_file, platform_name):
     return df
 
 
+def convert_numeric_columns(df: pd.DataFrame, numeric_columns: List[str]) -> pd.DataFrame:
+    for col in numeric_columns:
+        if col in df.columns:
+            series = df[col].astype(str)
+            series = series.replace(
+                {"None": "", "nan": "", "NaN": "", "null": "", "NULL": "", "-": ""},
+                regex=False,
+            )
+            series = series.str.replace(",", "", regex=False)
+            series = series.str.replace(" ", "", regex=False)
+            series = series.str.replace("%", "", regex=False)
+            series = series.str.replace(r"[^0-9\.\-]", "", regex=True)
+            df[col] = pd.to_numeric(series, errors="coerce")
+    return df
+
+
+def add_naver_actual_cost(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    네이버만 실제 비용 = 비용 / 1.1
+    다른 매체는 빈 값 유지
+    """
+    df = df.copy()
+
+    if "실제 비용" not in df.columns:
+        df["실제 비용"] = ""
+
+    if "매체" in df.columns and "비용" in df.columns:
+        naver_mask = df["매체"] == "네이버"
+        df.loc[naver_mask, "실제 비용"] = df.loc[naver_mask, "비용"] / 1.1
+
+    return df
+
+
 def standardize_columns(df, platform_name, column_map):
     df = df.copy()
     df.columns = [clean_column_name(c) for c in df.columns]
@@ -379,6 +415,9 @@ def standardize_columns(df, platform_name, column_map):
             df[col] = ""
 
     df = df[FINAL_COLUMNS]
+    df = convert_numeric_columns(df, NUMERIC_COLUMNS)
+    df = add_naver_actual_cost(df)
+
     return df
 
 
@@ -420,9 +459,8 @@ if st.button("리포트 생성"):
         if file:
             df = load_file(file, name)
 
-            # 디버깅 (필요시 사용)
-            # if name == "네이버":
-            #     st.write(df.head())
+            if df is None:
+                continue
 
             df = standardize_columns(df, name, PLATFORM_MAPS[name])
             dfs.append(df)
