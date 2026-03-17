@@ -98,6 +98,49 @@ NAVER_COLUMN_MAP = {
     "3초조회": "동영상조회",
 }
 
+NAVER_GFA_COLUMN_MAP = {
+    "일별": "날짜",
+    "일자": "날짜",
+    "날짜": "날짜",
+    "캠페인": "캠페인명",
+    "캠페인명": "캠페인명",
+    "광고그룹": "광고그룹명",
+    "광고그룹명": "광고그룹명",
+    "소재": "광고명",
+    "광고": "광고명",
+    "광고명": "광고명",
+    "총비용(vat포함,원)": "비용",
+    "총비용": "비용",
+    "광고비": "비용",
+    "소진액": "비용",
+    "비용": "비용",
+    "노출": "노출",
+    "노출수": "노출",
+    "클릭": "클릭",
+    "클릭수": "클릭",
+    "총 전환수": "구매",
+    "총전환수": "구매",
+    "구매수": "구매",
+    "전환구매": "구매",
+    "총 전환매출액(원)": "매출액",
+    "총전환매출액(원)": "매출액",
+    "매출액": "매출액",
+    "구매액": "매출액",
+    "장바구니": "장바구니담기수",
+    "장바구니담기": "장바구니담기수",
+    "장바구니담기수": "장바구니담기수",
+    "도달": "도달",
+    "도달수": "도달",
+    "참여": "참여",
+    "참여수": "참여",
+    "팔로우": "팔로우",
+    "팔로우수": "팔로우",
+    "동영상조회": "동영상조회",
+    "동영상 조회": "동영상조회",
+    "영상조회": "동영상조회",
+    "3초조회": "동영상조회",
+}
+
 META_COLUMN_MAP = {
     "일": "날짜",
     "날짜": "날짜",
@@ -197,6 +240,84 @@ KAKAO_COLUMN_MAP = {
     "동영상 재생": "동영상조회",
 }
 
+CRITEO_COLUMN_MAP = {
+    "date": "날짜",
+    "day": "날짜",
+    "날짜": "날짜",
+    "일자": "날짜",
+    "campaign": "캠페인명",
+    "campaign name": "캠페인명",
+    "캠페인": "캠페인명",
+    "ad set": "광고그룹명",
+    "ad group": "광고그룹명",
+    "광고그룹": "광고그룹명",
+    "creative": "광고명",
+    "ad": "광고명",
+    "광고": "광고명",
+    "cost": "비용",
+    "spend": "비용",
+    "광고비": "비용",
+    "노출": "노출",
+    "impressions": "노출",
+    "클릭": "클릭",
+    "clicks": "클릭",
+    "orders": "구매",
+    "purchase": "구매",
+    "구매": "구매",
+    "sales": "매출액",
+    "revenue": "매출액",
+    "매출": "매출액",
+    "basket": "장바구니담기수",
+    "add to cart": "장바구니담기수",
+    "장바구니": "장바구니담기수",
+    "reach": "도달",
+    "도달": "도달",
+    "engagement": "참여",
+    "참여": "참여",
+    "follow": "팔로우",
+    "팔로우": "팔로우",
+    "video views": "동영상조회",
+    "동영상조회": "동영상조회",
+}
+
+BUZZVIL_COLUMN_MAP = {
+    "date": "날짜",
+    "day": "날짜",
+    "날짜": "날짜",
+    "일자": "날짜",
+    "campaign": "캠페인명",
+    "campaign name": "캠페인명",
+    "캠페인": "캠페인명",
+    "ad group": "광고그룹명",
+    "광고그룹": "광고그룹명",
+    "creative": "광고명",
+    "ad": "광고명",
+    "광고": "광고명",
+    "cost": "비용",
+    "spend": "비용",
+    "광고비": "비용",
+    "노출": "노출",
+    "impressions": "노출",
+    "클릭": "클릭",
+    "clicks": "클릭",
+    "purchase": "구매",
+    "purchases": "구매",
+    "구매": "구매",
+    "revenue": "매출액",
+    "sales": "매출액",
+    "매출": "매출액",
+    "add to cart": "장바구니담기수",
+    "장바구니": "장바구니담기수",
+    "reach": "도달",
+    "도달": "도달",
+    "engagement": "참여",
+    "참여": "참여",
+    "follow": "팔로우",
+    "팔로우": "팔로우",
+    "video views": "동영상조회",
+    "동영상조회": "동영상조회",
+}
+
 TIKTOK_COLUMN_MAP = {
     "date": "날짜",
     "By day": "날짜",
@@ -242,8 +363,11 @@ TIKTOK_COLUMN_MAP = {
 
 PLATFORM_MAPS = {
     "네이버": NAVER_COLUMN_MAP,
+    "네이버 성과형디스플레이": NAVER_GFA_COLUMN_MAP,
     "메타": META_COLUMN_MAP,
     "카카오": KAKAO_COLUMN_MAP,
+    "크리테오": CRITEO_COLUMN_MAP,
+    "버즈빌": BUZZVIL_COLUMN_MAP,
     "틱톡": TIKTOK_COLUMN_MAP,
 }
 
@@ -336,8 +460,9 @@ def load_file(uploaded_file, platform_name):
         return None
 
     file_name = uploaded_file.name.lower()
+    naver_like_platforms = ["네이버", "네이버 성과형디스플레이"]
 
-    if platform_name == "네이버":
+    if platform_name in naver_like_platforms:
         if file_name.endswith(".csv"):
             df = load_naver_csv_file(uploaded_file)
         else:
@@ -999,16 +1124,22 @@ with tab1:
     c1, c2 = st.columns(2)
     with c1:
         naver = st.file_uploader("네이버", type=["csv", "xlsx"], key="naver")
+        naver_gfa = st.file_uploader("네이버 성과형디스플레이", type=["csv", "xlsx"], key="naver_gfa")
         kakao = st.file_uploader("카카오", type=["csv", "xlsx"], key="kakao")
+        buzzvil = st.file_uploader("버즈빌", type=["csv", "xlsx"], key="buzzvil")
 
     with c2:
         meta = st.file_uploader("메타", type=["csv", "xlsx"], key="meta")
+        criteo = st.file_uploader("크리테오", type=["csv", "xlsx"], key="criteo")
         tiktok = st.file_uploader("틱톡", type=["csv", "xlsx"], key="tiktok")
 
     files = [
         ("네이버", naver),
+        ("네이버 성과형디스플레이", naver_gfa),
         ("메타", meta),
         ("카카오", kakao),
+        ("크리테오", criteo),
+        ("버즈빌", buzzvil),
         ("틱톡", tiktok),
     ]
 
