@@ -1,7 +1,8 @@
 import json
 from datetime import datetime
-import requests
+
 import pandas as pd
+import requests
 import streamlit as st
 
 
@@ -17,7 +18,9 @@ def _validate_date(date_text: str) -> str:
         datetime.strptime(date_text, "%Y-%m-%d")
         return date_text
     except ValueError as e:
-        raise ValueError(f"날짜 형식이 잘못되었습니다: {date_text} (예: 2026-03-18)") from e
+        raise ValueError(
+            f"날짜 형식이 잘못되었습니다: {date_text} (예: 2026-03-18)"
+        ) from e
 
 
 def _normalize_ad_account_id(ad_account_id: str) -> str:
@@ -122,14 +125,14 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "action_attribution_windows": json.dumps(["7d_click", "1d_view"]),
         "action_report_time": "conversion",
         "time_range": json.dumps(
-        {
-            "since": start_date,
-            "until": end_date,
-        },
-        ensure_ascii=False,
-    ),
-}
-    # 전환/매출/장바구니/팔로우 후보 액션
+            {
+                "since": start_date,
+                "until": end_date,
+            },
+            ensure_ascii=False,
+        ),
+    }
+
     purchase_types = {
         "purchase",
         "omni_purchase",
@@ -153,7 +156,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "page_like",
     }
 
-    # 실제 샘플 응답에 내려온 참여 액션 반영
     engagement_types = {
         "page_engagement",
         "post_engagement",
@@ -181,54 +183,38 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
 
             data = result.get("data", [])
 
-for item in data:
-    actions = item.get("actions", [])
-    action_values = item.get("action_values", [])
-    video_actions = item.get("video_play_actions", [])
+            for item in data:
+                actions = item.get("actions", [])
+                action_values = item.get("action_values", [])
+                video_actions = item.get("video_play_actions", [])
 
-    action_types = [a.get("action_type") for a in actions if isinstance(a, dict)]
-    if any(t in action_types for t in [
-        "purchase",
-        "omni_purchase",
-        "offsite_conversion.fb_pixel_purchase",
-        "onsite_web_purchase",
-        "add_to_cart",
-        "omni_add_to_cart",
-        "offsite_conversion.fb_pixel_add_to_cart",
-        "onsite_web_add_to_cart",
-    ]):
-        st.write("전환 발견 광고명:", item.get("ad_name", ""))
-        st.json(actions)
-        st.json(action_values)
-        break
+                purchase = _extract_action_total(actions, purchase_types)
+                revenue = _extract_action_total(action_values, purchase_types)
+                add_to_cart = _extract_action_total(actions, add_to_cart_types)
+                follows = _extract_action_total(actions, follow_types)
+                engagement = _extract_action_total(actions, engagement_types)
+                video_views = _extract_video_views(video_actions)
 
-    purchase = _extract_action_total(actions, purchase_types)
-    revenue = _extract_action_total(action_values, purchase_types)
-    add_to_cart = _extract_action_total(actions, add_to_cart_types)
-    follows = _extract_action_total(actions, follow_types)
-    engagement = _extract_action_total(actions, engagement_types)
-    video_views = _extract_video_views(video_actions)
-
-    rows.append(
-        {
-            "날짜": item.get("date_start", ""),
-            "캠페인명": item.get("campaign_name", ""),
-            "광고그룹명": item.get("adset_name", ""),
-            "광고명": item.get("ad_name", ""),
-            "비용": _safe_float(item.get("spend", 0)),
-            "실제 비용": "",
-            "노출": _safe_int(item.get("impressions", 0)),
-            "클릭": _safe_int(item.get("clicks", 0)),
-            "구매": purchase,
-            "매출액": revenue,
-            "장바구니담기수": add_to_cart,
-            "도달": _safe_int(item.get("reach", 0)),
-            "참여": engagement,
-            "팔로우": follows,
-            "동영상조회": video_views,
-            "매체": "메타",
-        }
-    )
+                rows.append(
+                    {
+                        "날짜": item.get("date_start", ""),
+                        "캠페인명": item.get("campaign_name", ""),
+                        "광고그룹명": item.get("adset_name", ""),
+                        "광고명": item.get("ad_name", ""),
+                        "비용": _safe_float(item.get("spend", 0)),
+                        "실제 비용": "",
+                        "노출": _safe_int(item.get("impressions", 0)),
+                        "클릭": _safe_int(item.get("clicks", 0)),
+                        "구매": purchase,
+                        "매출액": revenue,
+                        "장바구니담기수": add_to_cart,
+                        "도달": _safe_int(item.get("reach", 0)),
+                        "참여": engagement,
+                        "팔로우": follows,
+                        "동영상조회": video_views,
+                        "매체": "메타",
+                    }
+                )
 
             paging = result.get("paging", {})
             next_url = paging.get("next")
