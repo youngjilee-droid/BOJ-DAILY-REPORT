@@ -128,18 +128,13 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         ),
     }
 
+    # 전환/매출/장바구니/팔로우 후보 액션
     purchase_types = {
         "purchase",
         "omni_purchase",
         "offsite_conversion.fb_pixel_purchase",
         "onsite_web_purchase",
-    }
-
-    purchase_value_types = {
-        "purchase",
-        "omni_purchase",
-        "offsite_conversion.fb_pixel_purchase",
-        "onsite_web_purchase",
+        "offsite_conversion.purchase",
     }
 
     add_to_cart_types = {
@@ -147,21 +142,22 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "omni_add_to_cart",
         "offsite_conversion.fb_pixel_add_to_cart",
         "onsite_web_add_to_cart",
-    }
-
-    engagement_types = {
-        "post_engagement",
-        "page_engagement",
-        "onsite_post_engagement",
-        "post_reaction",
-        "comment",
-        "post",
+        "offsite_conversion.add_to_cart",
     }
 
     follow_types = {
-        "follows",
         "follow",
+        "follows",
         "instagram_profile_follows",
+        "page_like",
+    }
+
+    # 실제 샘플 응답에 내려온 참여 액션 반영
+    engagement_types = {
+        "page_engagement",
+        "post_engagement",
+        "post_interaction_gross",
+        "post",
     }
 
     rows = []
@@ -185,18 +181,15 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
             data = result.get("data", [])
 
             for item in data:
-                st.write("📌 actions:", item.get("actions", []))
-                st.write("📌 action_values:", item.get("action_values", []))
-                break
                 actions = item.get("actions", [])
                 action_values = item.get("action_values", [])
                 video_actions = item.get("video_play_actions", [])
 
                 purchase = _extract_action_total(actions, purchase_types)
-                revenue = _extract_action_total(action_values, purchase_value_types)
+                revenue = _extract_action_total(action_values, purchase_types)
                 add_to_cart = _extract_action_total(actions, add_to_cart_types)
-                engagement = _extract_action_total(actions, engagement_types)
                 follows = _extract_action_total(actions, follow_types)
+                engagement = _extract_action_total(actions, engagement_types)
                 video_views = _extract_video_views(video_actions)
 
                 rows.append(
