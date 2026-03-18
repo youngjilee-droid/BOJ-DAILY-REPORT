@@ -63,25 +63,5 @@ def fetch_meta_data(start_date, end_date):
             "매출": revenue,
             "매체": "META"
         })
-from meta_api import fetch_meta_data
+
     return pd.DataFrame(rows)
-st.subheader("📥 데이터 자동 수집")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    start_date = st.date_input("시작일")
-with col2:
-    end_date = st.date_input("종료일")
-
-if st.button("Meta 데이터 가져오기"):
-    meta_df = fetch_meta_data(str(start_date), str(end_date))
-
-    if not meta_df.empty:
-        st.success("Meta 데이터 수집 완료")
-        st.dataframe(meta_df)
-
-        # 기존 데이터프레임에 추가
-        dataframes.append(meta_df)
-    else:
-        st.warning("데이터 없음")
