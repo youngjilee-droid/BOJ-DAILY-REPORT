@@ -4,7 +4,28 @@ from typing import Optional, Dict, List
 
 import pandas as pd
 import streamlit as st
+from meta_api import fetch_meta_data
 
+st.subheader("📥 데이터 자동 수집")
+
+col1, col2 = st.columns(2)
+
+with col1:
+    start_date = st.date_input("시작일")
+with col2:
+    end_date = st.date_input("종료일")
+
+if st.button("Meta 데이터 가져오기"):
+    meta_df = fetch_meta_data(str(start_date), str(end_date))
+
+    if not meta_df.empty:
+        st.success("Meta 데이터 수집 완료")
+        st.dataframe(meta_df)
+
+        # 기존 데이터프레임에 추가
+        dataframes.append(meta_df)
+    else:
+        st.warning("데이터 없음")
 
 # =========================================================
 # 1. 기본 설정
@@ -1172,3 +1193,4 @@ with tab4:
         render_daily_comment_section(comment_df)
     else:
         st.info("먼저 '리포트 생성기' 탭에서 통합 리포트를 생성해 주세요.")
+    
