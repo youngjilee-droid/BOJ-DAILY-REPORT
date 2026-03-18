@@ -9,22 +9,25 @@ def fetch_meta_data(start_date, end_date):
 
     url = f"https://graph.facebook.com/v19.0/{ad_account_id}/insights"
 
-    params = {
-        "access_token": access_token,
-        "time_range": {"since": start_date, "until": end_date},
-        "fields": ",".join([
-            "date_start",
-            "campaign_name",
-            "adset_name",
-            "ad_name",
-            "impressions",
-            "clicks",
-            "spend",
-            "actions",
-            "action_values"
-        ]),
-        "level": "ad"
-    }
+ params = {
+    "access_token": access_token,
+    "time_range": {
+        "since": start_date,
+        "until": end_date
+    },
+    "fields": ",".join([
+        "date_start",
+        "campaign_name",
+        "adset_name",
+        "ad_name",
+        "impressions",
+        "clicks",
+        "spend",
+        "actions",
+        "action_values"
+    ]),
+    "level": "ad"
+}
 
     response = requests.get(url, params=params)
 
