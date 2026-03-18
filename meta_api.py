@@ -2,6 +2,7 @@ import requests
 import pandas as pd
 import streamlit as st
 
+
 @st.cache_data(ttl=3600)
 def fetch_meta_data(start_date, end_date):
     access_token = st.secrets["META_ACCESS_TOKEN"]
@@ -9,25 +10,25 @@ def fetch_meta_data(start_date, end_date):
 
     url = f"https://graph.facebook.com/v19.0/{ad_account_id}/insights"
 
- params = {
-    "access_token": access_token,
-    "time_range": {
-        "since": start_date,
-        "until": end_date
-    },
-    "fields": ",".join([
-        "date_start",
-        "campaign_name",
-        "adset_name",
-        "ad_name",
-        "impressions",
-        "clicks",
-        "spend",
-        "actions",
-        "action_values"
-    ]),
-    "level": "ad"
-}
+    params = {
+        "access_token": access_token,
+        "time_range": {
+            "since": start_date,
+            "until": end_date
+        },
+        "fields": ",".join([
+            "date_start",
+            "campaign_name",
+            "adset_name",
+            "ad_name",
+            "impressions",
+            "clicks",
+            "spend",
+            "actions",
+            "action_values"
+        ]),
+        "level": "ad"
+    }
 
     response = requests.get(url, params=params)
 
@@ -35,24 +36,24 @@ def fetch_meta_data(start_date, end_date):
         st.error(f"Meta API 오류: {response.text}")
         return pd.DataFrame()
 
-    data = response.json().get("data", [])
+    result = response.json()
+    data = result.get("data", [])
 
     rows = []
-    for item in data:
-        purchase = 0
-        revenue = 0
 
-        # 전환 추출
+    for item in data:
+        purchase = 0.0
+        revenue = 0.0
+
         if "actions" in item:
             for act in item["actions"]:
-                if act["action_type"] == "purchase":
-                    purchase = float(act["value"])
+                if act.get("action_type") == "purchase":
+                    purchase = float(act.get("value", 0))
 
-        # 매출 추출
         if "action_values" in item:
             for val in item["action_values"]:
-                if val["action_type"] == "purchase":
-                    revenue = float(val["value"])
+                if val.get("action_type") == "purchase":
+                    revenue = float(val.get("value", 0))
 
         rows.append({
             "날짜": item.get("date_start"),
