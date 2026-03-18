@@ -113,20 +113,22 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "video_play_actions",
     ]
 
-    params = {
-        "access_token": access_token,
-        "fields": ",".join(fields),
-        "level": "ad",
-        "limit": 500,
-        "time_increment": 1,
-        "time_range": json.dumps(
-            {
-                "since": start_date,
-                "until": end_date,
-            },
-            ensure_ascii=False,
-        ),
-    }
+params = {
+    "access_token": access_token,
+    "fields": ",".join(fields),
+    "level": "ad",
+    "limit": 500,
+    "time_increment": 1,
+    "action_attribution_windows": json.dumps(["7d_click", "1d_view"]),
+    "action_report_time": "conversion",
+    "time_range": json.dumps(
+        {
+            "since": start_date,
+            "until": end_date,
+        },
+        ensure_ascii=False,
+    ),
+}
 
     # 전환/매출/장바구니/팔로우 후보 액션
     purchase_types = {
@@ -180,10 +182,26 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
 
             data = result.get("data", [])
 
-            for item in data:
-                actions = item.get("actions", [])
-                action_values = item.get("action_values", [])
-                video_actions = item.get("video_play_actions", [])
+         for item in data:
+    actions = item.get("actions", [])
+    action_values = item.get("action_values", [])
+    video_actions = item.get("video_play_actions", [])
+
+    action_types = [a.get("action_type") for a in actions if isinstance(a, dict)]
+    if any(t in action_types for t in [
+        "purchase",
+        "omni_purchase",
+        "offsite_conversion.fb_pixel_purchase",
+        "onsite_web_purchase",
+        "add_to_cart",
+        "omni_add_to_cart",
+        "offsite_conversion.fb_pixel_add_to_cart",
+        "onsite_web_add_to_cart"
+    ]):
+        st.write("전환 발견 광고명:", item.get("ad_name", ""))
+        st.json(actions)
+        st.json(action_values)
+        break
 
                 purchase = _extract_action_total(actions, purchase_types)
                 revenue = _extract_action_total(action_values, purchase_types)
