@@ -44,17 +44,31 @@ def _safe_float(value, default=0.0):
         return default
 
 
-def _extract_action_value(action_list, action_type="purchase"):
+def _extract_action_total(action_list, target_types):
     """
-    actions / action_values 리스트에서 특정 action_type 값 추출
+    actions / action_values 리스트에서 여러 action_type 값 합산
     """
     if not isinstance(action_list, list):
         return 0.0
 
     total = 0.0
     for item in action_list:
-        if item.get("action_type") == action_type:
+        action_type = item.get("action_type")
+        if action_type in target_types:
             total += _safe_float(item.get("value", 0))
+    return total
+
+
+def _extract_video_views(video_action_list):
+    """
+    video_play_actions 리스트 합산
+    """
+    if not isinstance(video_action_list, list):
+        return 0.0
+
+    total = 0.0
+    for item in video_action_list:
+        total += _safe_float(item.get("value", 0))
     return total
 
 
@@ -93,12 +107,12 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "impressions",
         "clicks",
         "spend",
+        "reach",
         "actions",
         "action_values",
+        "video_play_actions",
     ]
 
-    # 핵심: time_range를 JSON 문자열로 명시 전달
-    # Meta가 기대하는 형식: {'since':'YYYY-MM-DD','until':'YYYY-MM-DD'}
     params = {
         "access_token": access_token,
         "fields": ",".join(fields),
@@ -112,6 +126,42 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
             },
             ensure_ascii=False,
         ),
+    }
+
+    purchase_types = {
+        "purchase",
+        "omni_purchase",
+        "offsite_conversion.fb_pixel_purchase",
+        "onsite_web_purchase",
+    }
+
+    purchase_value_types = {
+        "purchase",
+        "omni_purchase",
+        "offsite_conversion.fb_pixel_purchase",
+        "onsite_web_purchase",
+    }
+
+    add_to_cart_types = {
+        "add_to_cart",
+        "omni_add_to_cart",
+        "offsite_conversion.fb_pixel_add_to_cart",
+        "onsite_web_add_to_cart",
+    }
+
+    engagement_types = {
+        "post_engagement",
+        "page_engagement",
+        "onsite_post_engagement",
+        "post_reaction",
+        "comment",
+        "post",
+    }
+
+    follow_types = {
+        "follows",
+        "follow",
+        "instagram_profile_follows",
     }
 
     rows = []
@@ -128,7 +178,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
 
             result = response.json()
 
-            # API 자체 에러 처리
             if "error" in result:
                 st.error(f"Meta API 오류: {result['error']}")
                 return pd.DataFrame()
@@ -136,8 +185,16 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
             data = result.get("data", [])
 
             for item in data:
-                purchase = _extract_action_value(item.get("actions", []), "purchase")
-                revenue = _extract_action_value(item.get("action_values", []), "purchase")
+                actions = item.get("actions", [])
+                action_values = item.get("action_values", [])
+                video_actions = item.get("video_play_actions", [])
+
+                purchase = _extract_action_total(actions, purchase_types)
+                revenue = _extract_action_total(action_values, purchase_value_types)
+                add_to_cart = _extract_action_total(actions, add_to_cart_types)
+                engagement = _extract_action_total(actions, engagement_types)
+                follows = _extract_action_total(actions, follow_types)
+                video_views = _extract_video_views(video_actions)
 
                 rows.append(
                     {
@@ -145,19 +202,23 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
                         "캠페인명": item.get("campaign_name", ""),
                         "광고그룹명": item.get("adset_name", ""),
                         "광고명": item.get("ad_name", ""),
+                        "비용": _safe_float(item.get("spend", 0)),
+                        "실제 비용": "",
                         "노출": _safe_int(item.get("impressions", 0)),
                         "클릭": _safe_int(item.get("clicks", 0)),
-                        "비용": _safe_float(item.get("spend", 0)),
-                        "전환": purchase,
-                        "매출": revenue,
-                        "매체": "META",
+                        "구매": purchase,
+                        "매출액": revenue,
+                        "장바구니담기수": add_to_cart,
+                        "도달": _safe_int(item.get("reach", 0)),
+                        "참여": engagement,
+                        "팔로우": follows,
+                        "동영상조회": video_views,
+                        "매체": "메타",
                     }
                 )
 
             paging = result.get("paging", {})
             next_url = paging.get("next")
-
-            # next URL에는 이미 쿼리스트링이 포함되므로 params 제거
             next_params = None
 
     except requests.exceptions.RequestException as e:
@@ -172,17 +233,22 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
     if df.empty:
         return df
 
-    # 컬럼 순서 정리
     ordered_cols = [
         "날짜",
         "캠페인명",
         "광고그룹명",
         "광고명",
+        "비용",
+        "실제 비용",
         "노출",
         "클릭",
-        "비용",
-        "전환",
-        "매출",
+        "구매",
+        "매출액",
+        "장바구니담기수",
+        "도달",
+        "참여",
+        "팔로우",
+        "동영상조회",
         "매체",
     ]
     df = df[ordered_cols]
