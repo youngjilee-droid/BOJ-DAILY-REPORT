@@ -181,7 +181,7 @@ META_COLUMN_MAP = {
     "지출 금액": "비용", "지출 금액 (krw)": "비용", "amount spent": "비용", "spend": "비용",
     "노출": "노출", "impressions": "노출",
     "링크 클릭": "클릭", "클릭": "클릭", "clicks": "클릭",
-    "구매": "구매", "purchases": "구매", "공유 항목이 포함된 구매": "구매",
+    "구매": "구매", "공유 항목이 포함된 구매": "구매",
     "website purchases": "구매", "meta purchases": "구매",
     "구매 전환값": "매출액", "공유 항목의 구매 전환값": "매출액",
     "purchase conversion value": "매출액", "website purchase conversion value": "매출액",
