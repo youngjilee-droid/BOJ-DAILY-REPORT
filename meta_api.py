@@ -185,6 +185,9 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
             data = result.get("data", [])
 
             for item in data:
+                st.write("📌 actions:", item.get("actions", []))
+                st.write("📌 action_values:", item.get("action_values", []))
+                break
                 actions = item.get("actions", [])
                 action_values = item.get("action_values", [])
                 video_actions = item.get("video_play_actions", [])
