@@ -6,27 +6,6 @@ import pandas as pd
 import streamlit as st
 from meta_api import fetch_meta_data
 
-st.subheader("📥 데이터 자동 수집")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    start_date = st.date_input("시작일")
-with col2:
-    end_date = st.date_input("종료일")
-
-if st.button("Meta 데이터 가져오기"):
-    meta_df = fetch_meta_data(str(start_date), str(end_date))
-
-    if not meta_df.empty:
-        st.success("Meta 데이터 수집 완료")
-        st.dataframe(meta_df)
-
-        # 기존 데이터프레임에 추가
-        dataframes.append(meta_df)
-    else:
-        st.warning("데이터 없음")
-
 # =========================================================
 # 1. 기본 설정
 # =========================================================
@@ -34,6 +13,12 @@ st.set_page_config(page_title="광고 통합 리포트 & 대시보드", layout="
 
 st.title("광고 통합 리포트 & 대시보드")
 st.write("매체별 RAW 데이터를 업로드하면 통합 리포트, 대시보드, 전일/전전일 요약, 룰 기반 데일리 코멘트를 함께 확인할 수 있습니다.")
+
+if "meta_auto_df" not in st.session_state:
+    st.session_state["meta_auto_df"] = pd.DataFrame()
+
+if "final_report_df" not in st.session_state:
+    st.session_state["final_report_df"] = pd.DataFrame()
 
 
 # =========================================================
@@ -1110,6 +1095,29 @@ tab1, tab2, tab3, tab4 = st.tabs([
 ])
 
 with tab1:
+    st.markdown("### Meta API 자동 수집")
+
+    m1, m2 = st.columns(2)
+    with m1:
+        start_date = st.date_input("시작일", key="meta_start_date")
+    with m2:
+        end_date = st.date_input("종료일", key="meta_end_date")
+
+    if st.button("Meta 데이터 가져오기", key="fetch_meta_api"):
+        meta_api_df = fetch_meta_data(str(start_date), str(end_date))
+
+        if not meta_api_df.empty:
+            st.session_state["meta_auto_df"] = meta_api_df.copy()
+            st.success("Meta 데이터 수집 완료")
+        else:
+            st.session_state["meta_auto_df"] = pd.DataFrame()
+            st.warning("Meta API에서 불러온 데이터가 없습니다.")
+
+    if not st.session_state["meta_auto_df"].empty:
+        st.markdown("### Meta API 수집 결과")
+        st.dataframe(st.session_state["meta_auto_df"], use_container_width=True)
+
+    st.markdown("---")
     st.markdown("### 매체별 RAW 업로드")
 
     c1, c2 = st.columns(2)
@@ -1136,6 +1144,11 @@ with tab1:
 
     if st.button("리포트 생성", key="build_report"):
         dfs = []
+
+        if not st.session_state["meta_auto_df"].empty:
+            meta_auto_df = st.session_state["meta_auto_df"].copy()
+            meta_auto_df = standardize_columns(meta_auto_df, "메타", PLATFORM_MAPS["메타"])
+            dfs.append(meta_auto_df)
 
         for name, file in files:
             if file:
