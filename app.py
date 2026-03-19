@@ -1,10 +1,11 @@
 import io
-import json
 import re
+import json
+import hashlib
+import hmac
 import time
 import base64
-import hmac
-import hashlib  # 사용하지 않지만 남겨두었습니다.
+import requests
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
 
@@ -16,7 +17,7 @@ from meta_api import fetch_meta_data
 # 0. OpenAI 임포트
 # =========================================================
 try:
-    from openai import OpenAI  # 수정된 부분
+    from openai import OpenAI
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
@@ -33,7 +34,7 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main { background-color: #f8f9fa; }
-    
+
     [data-testid="metric-container"] {
         background-color: white;
         border: 1px solid #e0e0e0;
@@ -708,7 +709,7 @@ def generate_ai_comment(total_df: pd.DataFrame, media_df: pd.DataFrame, campaign
 === 전전일 대비 증감 ({prev_row['날짜']} → {latest_row['날짜']}) ===
 - 비용 증감: {cost_chg:+.1f}%
 - 매출액 증감: {sales_chg:+.1f}%
-- ROAS 증감: {roas_chg:+.1f}%
+- ROAS 증감: {roas_chg:+.1f}%p
 - 구매수 증감: {purchase_chg:+.1f}%
 """
 
@@ -1488,3 +1489,225 @@ with tab1:
 
     for i, (name, key, icon) in enumerate(media_labels):
         with media_status_cols[i]:
+            has_data = not st.session_state.get(key, pd.DataFrame()).empty
+            status_color = "#28a745" if has_data else "#6c757d"
+            status_text = "수집완료" if has_data else "미수집"
+            st.markdown(f"""
+<div style='text-align:center; padding:10px; background:white;
+     border-radius:10px; border: 2px solid {status_color};'>
+    <div style='font-size:20px;'>{icon}</div>
+    <div style='font-weight:700; font-size:13px;'>{name}</div>
+    <div style='color:{status_color}; font-size:11px; font-weight:600;'>{status_text}</div>
+</div>
+""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    if st.button("🚀 전체 매체 API 데이터 한번에 수집", type="primary", use_container_width=True):
+        progress = st.progress(0)
+        status_text_el = st.empty()
+
+        apis = [
+            ("Meta", lambda: fetch_meta_data(str(start_date), str(end_date)), "meta_auto_df"),
+            ("네이버", lambda: fetch_naver_api_data(str(start_date), str(end_date)), "naver_auto_df"),
+            ("카카오", lambda: fetch_kakao_api_data(str(start_date), str(end_date)), "kakao_auto_df"),
+            ("틱톡", lambda: fetch_tiktok_api_data(str(start_date), str(end_date)), "tiktok_auto_df"),
+            ("크리테오", lambda: fetch_criteo_api_data(str(start_date), str(end_date)), "criteo_auto_df"),
+        ]
+
+        results = {}
+        for i, (name, fetch_fn, session_key) in enumerate(apis):
+            status_text_el.markdown(f"⏳ **{name}** 데이터 수집 중... ({i+1}/{len(apis)})")
+            try:
+                result_df = fetch_fn()
+                st.session_state[session_key] = result_df
+                results[name] = len(result_df) if not result_df.empty else 0
+            except Exception as e:
+                st.session_state[session_key] = pd.DataFrame()
+                results[name] = -1
+                st.warning(f"⚠️ {name} 수집 실패: {e}")
+            progress.progress((i + 1) / len(apis))
+
+        status_text_el.empty()
+        progress.empty()
+
+        success_count = sum(1 for v in results.values() if v > 0)
+        st.success(f"✅ 수집 완료! {success_count}/{len(apis)} 매체 성공")
+
+        for name, count in results.items():
+            if count > 0:
+                st.markdown(f"  - ✅ **{name}**: {count}개 행 수집")
+            elif count == 0:
+                st.markdown(f"  - ⚠️ **{name}**: 데이터 없음 (API 키 확인 필요)")
+            else:
+                st.markdown(f"  - ❌ **{name}**: 수집 실패")
+
+        st.rerun()
+
+    with st.expander("🔧 매체별 개별 수집"):
+        api_cols = st.columns(5)
+
+        with api_cols[0]:
+            if st.button("Meta 수집", use_container_width=True):
+                with st.spinner("Meta 수집 중..."):
+                    df = fetch_meta_data(str(start_date), str(end_date))
+                    st.session_state["meta_auto_df"] = df
+                    st.success(f"완료 ({len(df)}행)" if not df.empty else "데이터 없음")
+
+        with api_cols[1]:
+            if st.button("네이버 수집", use_container_width=True):
+                with st.spinner("네이버 수집 중..."):
+                    df = fetch_naver_api_data(str(start_date), str(end_date))
+                    st.session_state["naver_auto_df"] = df
+                    st.success(f"완료 ({len(df)}행)" if not df.empty else "데이터 없음")
+
+        with api_cols[2]:
+            if st.button("카카오 수집", use_container_width=True):
+                with st.spinner("카카오 수집 중..."):
+                    df = fetch_kakao_api_data(str(start_date), str(end_date))
+                    st.session_state["kakao_auto_df"] = df
+                    st.success(f"완료 ({len(df)}행)" if not df.empty else "데이터 없음")
+
+        with api_cols[3]:
+            if st.button("틱톡 수집", use_container_width=True):
+                with st.spinner("틱톡 수집 중..."):
+                    df = fetch_tiktok_api_data(str(start_date), str(end_date))
+                    st.session_state["tiktok_auto_df"] = df
+                    st.success(f"완료 ({len(df)}행)" if not df.empty else "데이터 없음")
+
+        with api_cols[4]:
+            if st.button("크리테오 수집", use_container_width=True):
+                with st.spinner("크리테오 수집 중..."):
+                    df = fetch_criteo_api_data(str(start_date), str(end_date))
+                    st.session_state["criteo_auto_df"] = df
+                    st.success(f"완료 ({len(df)}행)" if not df.empty else "데이터 없음")
+
+    st.markdown("---")
+    st.markdown("### 📁 RAW 파일 직접 업로드 (API 미연동 매체)")
+
+    with st.expander("📂 파일 업로드 열기", expanded=False):
+        c1, c2 = st.columns(2)
+
+        with c1:
+            naver = st.file_uploader("네이버 검색광고", type=["csv", "xlsx"], key="naver")
+            naver_gfa = st.file_uploader("네이버 성과형디스플레이", type=["csv", "xlsx"], key="naver_gfa")
+            kakao = st.file_uploader("카카오모먼트", type=["csv", "xlsx"], key="kakao")
+            buzzvil = st.file_uploader("버즈빌", type=["csv", "xlsx"], key="buzzvil")
+
+        with c2:
+            meta = st.file_uploader("메타 (파일)", type=["csv", "xlsx"], key="meta")
+            criteo = st.file_uploader("크리테오 (파일)", type=["csv", "xlsx"], key="criteo")
+            tiktok = st.file_uploader("틱톡 (파일)", type=["csv", "xlsx"], key="tiktok")
+
+    files = [
+        ("네이버", naver if 'naver' in dir() else None),
+        ("네이버 성과형디스플레이", naver_gfa if 'naver_gfa' in dir() else None),
+        ("메타", meta if 'meta' in dir() else None),
+        ("카카오", kakao if 'kakao' in dir() else None),
+        ("크리테오", criteo if 'criteo' in dir() else None),
+        ("버즈빌", buzzvil if 'buzzvil' in dir() else None),
+        ("틱톡", tiktok if 'tiktok' in dir() else None),
+    ]
+
+    st.markdown("---")
+    st.markdown("### 📊 통합 리포트 생성")
+
+    if st.button("📊 통합 리포트 생성하기", type="primary", use_container_width=True):
+        dfs = []
+
+        api_session_keys = [
+            ("meta_auto_df", "메타"),
+            ("naver_auto_df", "네이버"),
+            ("kakao_auto_df", "카카오"),
+            ("tiktok_auto_df", "틱톡"),
+            ("criteo_auto_df", "크리테오"),
+        ]
+
+        for session_key, media_name in api_session_keys:
+            df_api = st.session_state.get(session_key, pd.DataFrame())
+
+            if not df_api.empty:
+                if "매체" not in df_api.columns:
+                    df_api["매체"] = media_name
+
+                if set(FINAL_COLUMNS).issubset(set(df_api.columns)):
+                    df_std = df_api[FINAL_COLUMNS].copy()
+                else:
+                    df_std = standardize_columns(df_api, media_name, PLATFORM_MAPS.get(media_name, META_COLUMN_MAP))
+
+                dfs.append(df_std)
+
+        for name, file in files:
+            if file:
+                df = load_file(file, name)
+                if df is None:
+                    st.warning(f"⚠️ {name} 파일을 읽을 수 없습니다.")
+                    continue
+                df = standardize_columns(df, name, PLATFORM_MAPS[name])
+                dfs.append(df)
+
+        if dfs:
+            final = pd.concat(dfs, ignore_index=True)
+            final = convert_numeric_columns(final, NUMERIC_COLUMNS)
+            final = convert_date_column(final)
+            final = add_naver_actual_cost(final)
+
+            dedup_cols = ["날짜", "매체", "캠페인명", "광고그룹명", "광고명"]
+            available_dedup = [c for c in dedup_cols if c in final.columns]
+            final = final.drop_duplicates(subset=available_dedup, keep="last")
+
+            st.session_state["final_report_df"] = final
+
+            st.success(f"✅ 통합 리포트 생성 완료! 총 {len(final):,}개 행, {final['매체'].nunique()}개 매체")
+            st.dataframe(final, use_container_width=True)
+
+            st.markdown("#### 📥 다운로드")
+            dl1, dl2 = st.columns(2)
+
+            with dl1:
+                st.download_button(
+                    "📊 CSV 다운로드",
+                    to_csv(final),
+                    f"unified_report_{start_date}_{end_date}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                    key="final_csv_download"
+                )
+
+            with dl2:
+                excel_data = to_excel_multi_sheet({
+                    "통합리포트": final,
+                    "매체별요약": make_media_summary(build_dashboard_df(final)),
+                    "캠페인별요약": make_campaign_summary(build_dashboard_df(final)),
+                    "일자별요약": make_daily_summary(build_dashboard_df(final)),
+                })
+                st.download_button(
+                    "📑 엑셀 다운로드 (멀티시트)",
+                    excel_data,
+                    f"unified_report_{start_date}_{end_date}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="final_excel_download"
+                )
+        else:
+            st.error("❌ 수집된 데이터가 없습니다. API 수집 또는 파일 업로드를 먼저 해주세요.")
+
+with tab2:
+    if not st.session_state["final_report_df"].empty:
+        render_dashboard(st.session_state["final_report_df"])
+    else:
+        st.info("💡 먼저 '데이터 수집' 탭에서 통합 리포트를 생성해 주세요.")
+
+with tab3:
+    if not st.session_state["final_report_df"].empty:
+        comment_df = build_dashboard_df(st.session_state["final_report_df"])
+        render_comment_data_section(comment_df)
+    else:
+        st.info("💡 먼저 '데이터 수집' 탭에서 통합 리포트를 생성해 주세요.")
+
+with tab4:
+    if not st.session_state["final_report_df"].empty:
+        comment_df = build_dashboard_df(st.session_state["final_report_df"])
+        render_daily_comment_section(comment_df)
+    else:
+        st.info("💡 먼저 '데이터 수집' 탭에서 통합 리포트를 생성해 주세요.")
