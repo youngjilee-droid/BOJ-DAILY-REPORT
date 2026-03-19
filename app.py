@@ -1,4 +1,80 @@
-    .ai-comment-box {
+import base64
+import hmac
+import io
+import json
+import re
+import requests
+import time
+from datetime import datetime, timedelta
+from typing import Optional, Dict, List
+ 
+import pandas as pd
+import streamlit as st
+from meta_api import fetch_meta_data
+ 
+# =========================================================
+# 0. OpenAI 임포트
+# =========================================================
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+ 
+# =========================================================
+# 1. 기본 설정
+# =========================================================
+st.set_page_config(
+    page_title="광고 통합 대시보드",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+ 
+st.markdown("""
+<style>
+    .main { background-color: #f8f9fa; }
+    [data-testid="metric-container"] {
+        background-color: white;
+        border: 1px solid #e0e0e0;
+        border-radius: 12px;
+        padding: 16px 20px;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+    }
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+        background-color: #f0f2f6;
+        padding: 6px;
+        border-radius: 12px;
+    }
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 8px;
+        padding: 8px 20px;
+        font-weight: 600;
+    }
+    .filter-card {
+        background: white;
+        border-radius: 10px;
+        padding: 16px;
+        margin-bottom: 12px;
+        border: 1px solid #e8e8e8;
+    }
+    .media-badge-connected {
+        background: #d4edda;
+        color: #155724;
+        padding: 2px 10px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: 600;
+    }
+    .media-badge-manual {
+        background: #fff3cd;
+        color: #856404;
+        padding: 2px 10px;
+        border-radius: 20px;
+        font-size: 12px;
+        font-weight: 600;
+    }
+   .ai-comment-box {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
         padding: 20px;
