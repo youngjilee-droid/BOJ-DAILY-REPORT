@@ -5,10 +5,8 @@ import pandas as pd
 import requests
 import streamlit as st
 
-
 API_VERSION = "v25.0"
 BASE_URL = f"https://graph.facebook.com/{API_VERSION}"
-
 
 def _validate_date(date_text: str) -> str:
     """
@@ -22,7 +20,6 @@ def _validate_date(date_text: str) -> str:
             f"날짜 형식이 잘못되었습니다: {date_text} (예: 2026-03-18)"
         ) from e
 
-
 def _normalize_ad_account_id(ad_account_id: str) -> str:
     """
     act_ 접두어가 없으면 자동 보정
@@ -32,20 +29,17 @@ def _normalize_ad_account_id(ad_account_id: str) -> str:
         ad_account_id = f"act_{ad_account_id}"
     return ad_account_id
 
-
 def _safe_int(value, default=0):
     try:
         return int(float(value))
     except (TypeError, ValueError):
         return default
 
-
 def _safe_float(value, default=0.0):
     try:
         return float(value)
     except (TypeError, ValueError):
         return default
-
 
 def _extract_action_total(action_list, target_types):
     """
@@ -61,7 +55,6 @@ def _extract_action_total(action_list, target_types):
             total += _safe_float(item.get("value", 0))
     return total
 
-
 def _extract_video_views(video_action_list):
     """
     video_play_actions 리스트 합산
@@ -73,7 +66,6 @@ def _extract_video_views(video_action_list):
     for item in video_action_list:
         total += _safe_float(item.get("value", 0))
     return total
-
 
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
@@ -168,24 +160,24 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
     next_params = params.copy()
 
     try:
-       while next_url:
+        while next_url:
             response = requests.get(next_url, params=next_params, timeout=30)
- 
+
             if response.status_code != 200:
                 st.error(f"Meta API 오류: {response.text}")
                 return pd.DataFrame()
- 
+
             result = response.json()
- 
+
             if "error" in result:
                 st.error(f"Meta API 오류: {result['error']}")
                 return pd.DataFrame()
- 
+
             data = result.get("data", [])
- 
+
             # ✅ 여기서부터 디버깅 코드 추가 --------------------------
             st.warning(f"📦 API에서 받은 총 데이터 행 수: {len(data)}")
- 
+
             if len(data) == 0:
                 st.error("❌ Meta API가 데이터를 0건 반환했습니다. 날짜 범위나 계정 ID를 확인하세요.")
             else:
@@ -196,53 +188,12 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
                 st.write("💵 action_values:", first_item.get("action_values", "없음"))
             st.stop()  # 여기서 멈춰서 결과 확인
             # ✅ 디버깅 코드 끝 -----------------------------------------
- 
+
             for item in data:
                 actions = item.get("actions", [])
                 action_values = item.get("action_values", [])
                 video_actions = item.get("video_play_actions", [])
 
-                for item in data:
-                actions = item.get("actions", [])
-                action_values = item.get("action_values", [])
-                video_actions = item.get("video_play_actions", [])
-
-                purchase_types = {
-                    "purchase",
-                    "omni_purchase",
-                    "offsite_conversion.fb_pixel_purchase",
-                    "onsite_web_purchase",
-                    "offsite_conversion.purchase",
-    }
-
-                revenue_types = {
-                    "purchase",
-                    "omni_purchase",
-                    "offsite_conversion.fb_pixel_purchase",
-                    "onsite_web_purchase",
-                    "offsite_conversion.purchase",
-    }
-
-                # actions에서 매칭되는 purchase_types 확인
-                found_purchase = [
-                    a.get("action_type") 
-                    for a in actions 
-                    if a.get("action_type") in purchase_types
-    ]
-
-                # action_values에서 매칭되는 revenue_types 확인
-                found_revenue = [
-                    a.get("action_type") 
-                    for a in action_values 
-                    if a.get("action_type") in revenue_types
-    ]
-
-                st.write("🛒 purchase_types 매칭 결과:", found_purchase if found_purchase else "❌ 매칭 없음")
-                st.write("💰 revenue_types 매칭 결과:", found_revenue if found_revenue else "❌ 매칭 없음")
-                st.write("📋 전체 actions action_type 목록:", [a.get("action_type") for a in actions])
-                st.write("💵 전체 action_values action_type 목록:", [a.get("action_type") for a in action_values])
-                st.stop()  # 첫 번째 행만 확인하고 멈춤
- 
                 purchase = _extract_action_total(actions, purchase_types)
                 revenue = _extract_action_total(action_values, purchase_types)
                 add_to_cart = _extract_action_total(actions, add_to_cart_types)
