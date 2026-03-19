@@ -188,10 +188,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
                 action_values = item.get("action_values", [])
                 video_actions = item.get("video_play_actions", [])
 
-                if actions:
-                    st.write("📋 실제 action_type 목록:", [a.get("action_type") for a in actions])
-                    break  # 첫 번째 항목만 확인
-                
                 purchase = _extract_action_total(actions, purchase_types)
                 revenue = _extract_action_total(action_values, purchase_types)
                 add_to_cart = _extract_action_total(actions, add_to_cart_types)
