@@ -1,85 +1,3 @@
-import io
-import re
-import json
-import hashlib
-import hmac
-import time
-import base64
-import requests
-from datetime import datetime, timedelta
-from typing import Optional, Dict, List
-
-import pandas as pd
-import streamlit as st
-from meta_api import fetch_meta_data
-
-# =========================================================
-# 0. OpenAI 임포트
-# =========================================================
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
-
-# =========================================================
-# 1. 기본 설정
-# =========================================================
-st.set_page_config(
-    page_title="광고 통합 대시보드",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
-
-st.markdown("""
-<style>
-    .main { background-color: #f8f9fa; }
-
-    [data-testid="metric-container"] {
-        background-color: white;
-        border: 1px solid #e0e0e0;
-        border-radius: 12px;
-        padding: 16px 20px;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-    }
-
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 8px;
-        background-color: #f0f2f6;
-        padding: 6px;
-        border-radius: 12px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 8px;
-        padding: 8px 20px;
-        font-weight: 600;
-    }
-
-    .filter-card {
-        background: white;
-        border-radius: 10px;
-        padding: 16px;
-        margin-bottom: 12px;
-        border: 1px solid #e8e8e8;
-    }
-
-    .media-badge-connected {
-        background: #d4edda;
-        color: #155724;
-        padding: 2px 10px;
-        border-radius: 20px;
-        font-size: 12px;
-        font-weight: 600;
-    }
-    .media-badge-manual {
-        background: #fff3cd;
-        color: #856404;
-        padding: 2px 10px;
-        border-radius: 20px;
-        font-size: 12px;
-        font-weight: 600;
-    }
-
     .ai-comment-box {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
@@ -87,7 +5,6 @@ st.markdown("""
         border-radius: 12px;
         line-height: 1.8;
     }
-
     .quick-filter-btn {
         display: inline-block;
         padding: 6px 14px;
@@ -97,10 +14,8 @@ st.markdown("""
         cursor: pointer;
         font-size: 13px;
     }
-
     .delta-up { color: #28a745; font-weight: 700; }
     .delta-down { color: #dc3545; font-weight: 700; }
-
     .section-header {
         border-left: 4px solid #4f46e5;
         padding-left: 12px;
@@ -709,7 +624,7 @@ def generate_ai_comment(total_df: pd.DataFrame, media_df: pd.DataFrame, campaign
 === 전전일 대비 증감 ({prev_row['날짜']} → {latest_row['날짜']}) ===
 - 비용 증감: {cost_chg:+.1f}%
 - 매출액 증감: {sales_chg:+.1f}%
-- ROAS 증감: {roas_chg:+.1f}%p
+- ROAS 증감: {roas_chg:+.1f}%
 - 구매수 증감: {purchase_chg:+.1f}%
 """
 
@@ -1423,7 +1338,6 @@ def render_daily_comment_section(df: pd.DataFrame):
 {st.session_state["ai_comment"].replace(chr(10), "<br>")}
 </div>
 """, unsafe_allow_html=True)
-
         st.download_button(
             "📥 AI 코멘트 다운로드",
             data=st.session_state["ai_comment"].encode("utf-8"),
@@ -1527,7 +1441,6 @@ with tab1:
                 results[name] = -1
                 st.warning(f"⚠️ {name} 수집 실패: {e}")
             progress.progress((i + 1) / len(apis))
-
         status_text_el.empty()
         progress.empty()
 
