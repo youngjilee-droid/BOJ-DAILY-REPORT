@@ -168,26 +168,40 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
     next_params = params.copy()
 
     try:
-        while next_url:
+       while next_url:
             response = requests.get(next_url, params=next_params, timeout=30)
-
+ 
             if response.status_code != 200:
                 st.error(f"Meta API 오류: {response.text}")
                 return pd.DataFrame()
-
+ 
             result = response.json()
-
+ 
             if "error" in result:
                 st.error(f"Meta API 오류: {result['error']}")
                 return pd.DataFrame()
-
+ 
             data = result.get("data", [])
-
+ 
+            # ✅ 여기서부터 디버깅 코드 추가 --------------------------
+            st.warning(f"📦 API에서 받은 총 데이터 행 수: {len(data)}")
+ 
+            if len(data) == 0:
+                st.error("❌ Meta API가 데이터를 0건 반환했습니다. 날짜 범위나 계정 ID를 확인하세요.")
+            else:
+                first_item = data[0]
+                st.write("🔑 첫 번째 데이터 키 목록:", list(first_item.keys()))
+                st.write("💰 spend 값:", first_item.get("spend"))
+                st.write("📋 actions:", first_item.get("actions", "없음"))
+                st.write("💵 action_values:", first_item.get("action_values", "없음"))
+            st.stop()  # 여기서 멈춰서 결과 확인
+            # ✅ 디버깅 코드 끝 -----------------------------------------
+ 
             for item in data:
                 actions = item.get("actions", [])
                 action_values = item.get("action_values", [])
                 video_actions = item.get("video_play_actions", [])
-
+ 
                 purchase = _extract_action_total(actions, purchase_types)
                 revenue = _extract_action_total(action_values, purchase_types)
                 add_to_cart = _extract_action_total(actions, add_to_cart_types)
