@@ -41,10 +41,6 @@ def _safe_float(value, default=0.0):
 
 
 def _extract_action_total(action_list, target_types):
-    """
-    list[{"action_type": "...", "value": "..."}] 에서
-    target_types 에 해당하는 value 합산
-    """
     if not isinstance(action_list, list):
         return 0.0
 
@@ -52,22 +48,6 @@ def _extract_action_total(action_list, target_types):
     for item in action_list:
         action_type = str(item.get("action_type", "")).strip()
         if action_type in target_types:
-            total += _safe_float(item.get("value", 0))
-    return total
-
-
-def _extract_action_total_fuzzy(action_list, include_keywords):
-    """
-    action_type 이름이 계정/캠페인마다 조금 다를 수 있어
-    특정 키워드가 포함된 항목을 합산
-    """
-    if not isinstance(action_list, list):
-        return 0.0
-
-    total = 0.0
-    for item in action_list:
-        action_type = str(item.get("action_type", "")).strip().lower()
-        if all(keyword in action_type for keyword in include_keywords):
             total += _safe_float(item.get("value", 0))
     return total
 
@@ -106,6 +86,7 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
 
     url = f"{BASE_URL}/{ad_account_id}/insights"
 
+    # 안정적으로 확인된 기본 필드만 요청
     fields = [
         "date_start",
         "date_stop",
@@ -120,9 +101,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "action_values",
         "cost_per_action_type",
         "video_play_actions",
-        "catalog_segment_actions",
-        "catalog_segment_value",
-        "purchase_roas",
     ]
 
     params = {
@@ -142,7 +120,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         ),
     }
 
-    # 일반 전환 후보
     purchase_types = {
         "purchase",
         "omni_purchase",
@@ -150,21 +127,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "onsite_web_purchase",
         "offsite_conversion.purchase",
         "onsite_conversion.purchase",
-    }
-
-    # 협력광고 / shared items / catalog segment 계열 후보
-    collaborative_purchase_types = {
-        "purchase",
-        "omni_purchase",
-        "onsite_web_purchase",
-        "offsite_conversion.fb_pixel_purchase",
-        "catalog_segment_purchase",
-        "catalog_segment_omni_purchase",
-        "purchase_with_shared_items",
-        "omni_purchase_with_shared_items",
-        "website_purchase_with_shared_items",
-        "purchases_with_shared_items",
-        "shared_items_purchase",
     }
 
     add_to_cart_types = {
@@ -220,61 +182,31 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
             data = result.get("data", [])
 
             if not debug_logged:
-                st.info(f"📦 Meta API에서 받은 첫 페이지 데이터 행 수: {len(data)}")
+                st.info(f"📦 Meta API 첫 페이지 데이터 행 수: {len(data)}")
                 if len(data) > 0:
                     first_item = data[0]
                     st.write("🔑 첫 번째 데이터 키 목록:", list(first_item.keys()))
-                    st.write("📋 catalog_segment_actions:", first_item.get("catalog_segment_actions", []))
-                    st.write("💵 catalog_segment_value:", first_item.get("catalog_segment_value", []))
+                    st.write("📋 actions:", first_item.get("actions", []))
+                    st.write("💵 action_values:", first_item.get("action_values", []))
                 debug_logged = True
 
             for item in data:
                 actions = item.get("actions", [])
                 action_values = item.get("action_values", [])
-                catalog_actions = item.get("catalog_segment_actions", [])
-                catalog_values = item.get("catalog_segment_value", [])
                 video_actions = item.get("video_play_actions", [])
 
-                # 1) 구매: collaborative ads 우선
-                collaborative_purchase = _extract_action_total(
-                    catalog_actions, collaborative_purchase_types
-                )
-
-                if collaborative_purchase == 0:
-                    collaborative_purchase = _extract_action_total_fuzzy(
-                        catalog_actions, ["purchase"]
-                    )
-
-                if collaborative_purchase == 0:
-                    collaborative_purchase = _extract_action_total(
-                        actions, purchase_types
-                    )
-
-                # 2) 매출액: collaborative ads 우선
-                collaborative_revenue = _extract_action_total(
-                    catalog_values, collaborative_purchase_types
-                )
-
-                if collaborative_revenue == 0:
-                    collaborative_revenue = _extract_action_total_fuzzy(
-                        catalog_values, ["purchase"]
-                    )
-
-                if collaborative_revenue == 0:
-                    collaborative_revenue = _extract_action_total(
-                        action_values, purchase_types
-                    )
-
-                # 3) 기타 지표
+                purchase = _extract_action_total(actions, purchase_types)
+                revenue = _extract_action_total(action_values, purchase_types)
                 add_to_cart = _extract_action_total(actions, add_to_cart_types)
-
-                initiate_checkout = _extract_action_total(
-                    actions, initiate_checkout_types
-                )
-
-                engagement = _extract_action_total(actions, engagement_types)
+                initiate_checkout = _extract_action_total(actions, initiate_checkout_types)
                 follows = _extract_action_total(actions, follow_types)
+                engagement = _extract_action_total(actions, engagement_types)
                 video_views = _extract_video_views(video_actions)
+
+                # 현재 외부몰 구조에서는 purchase/revenue가 비어 있을 수 있음
+                # 실무상 대체 지표가 필요하면 아래 두 줄 중 하나를 사용
+                # purchase = purchase if purchase > 0 else initiate_checkout
+                # revenue = revenue  # 매출액은 API 실측이 아니므로 자동 대체하지 않음
 
                 rows.append(
                     {
@@ -286,8 +218,8 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
                         "실제 비용": "",
                         "노출": _safe_int(item.get("impressions", 0)),
                         "클릭": _safe_int(item.get("clicks", 0)),
-                        "구매": collaborative_purchase,
-                        "매출액": collaborative_revenue,
+                        "구매": purchase,
+                        "매출액": revenue,
                         "장바구니담기수": add_to_cart,
                         "결제시작수": initiate_checkout,
                         "도달": _safe_int(item.get("reach", 0)),
@@ -334,7 +266,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "매체",
     ]
 
-    # 없는 컬럼이 있어도 에러 안 나게 처리
     existing_cols = [col for col in ordered_cols if col in df.columns]
     df = df[existing_cols]
 
