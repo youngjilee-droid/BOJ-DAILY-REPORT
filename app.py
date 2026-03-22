@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import hmac
 import io
 import json
@@ -7,11 +8,11 @@ import requests
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List
- 
+
 import pandas as pd
 import streamlit as st
 from meta_api import fetch_meta_data
- 
+
 # =========================================================
 # 0. OpenAI 임포트
 # =========================================================
@@ -20,7 +21,8 @@ try:
     OPENAI_AVAILABLE = True
 except ImportError:
     OPENAI_AVAILABLE = False
- 
+
+
 # =========================================================
 # 1. 기본 설정
 # =========================================================
@@ -29,7 +31,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
- 
+
 st.markdown("""
 <style>
     .main { background-color: #f8f9fa; }
@@ -74,24 +76,13 @@ st.markdown("""
         font-size: 12px;
         font-weight: 600;
     }
-   .ai-comment-box {
+    .ai-comment-box {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
         padding: 20px;
         border-radius: 12px;
         line-height: 1.8;
     }
-    .quick-filter-btn {
-        display: inline-block;
-        padding: 6px 14px;
-        margin: 4px;
-        border-radius: 20px;
-        background: #e9ecef;
-        cursor: pointer;
-        font-size: 13px;
-    }
-    .delta-up { color: #28a745; font-weight: 700; }
-    .delta-down { color: #dc3545; font-weight: 700; }
     .section-header {
         border-left: 4px solid #4f46e5;
         padding-left: 12px;
@@ -105,7 +96,7 @@ st.markdown("""
      padding: 24px 32px; border-radius: 16px; margin-bottom: 24px;'>
     <h1 style='color: white; margin: 0; font-size: 28px;'>📊 광고 통합 대시보드</h1>
     <p style='color: #a8b2d8; margin: 6px 0 0 0; font-size: 14px;'>
-        Meta · 네이버 · 카카오 · 틱톡 · 크리테오 · 버즈빌 통합 성과 분석
+        Meta · 네이버 · 카카오 · 틱톡 · 크리테오 · 버즈빌 통합 성과 분석 + AI 코멘트/챗봇
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -113,10 +104,16 @@ st.markdown("""
 for key in [
     "meta_auto_df", "naver_auto_df", "kakao_auto_df",
     "tiktok_auto_df", "criteo_auto_df", "buzzvil_auto_df",
-    "final_report_df"
+    "final_report_df", "ai_comment", "ai_chat_history"
 ]:
     if key not in st.session_state:
-        st.session_state[key] = pd.DataFrame()
+        if key == "ai_chat_history":
+            st.session_state[key] = []
+        elif key == "ai_comment":
+            st.session_state[key] = ""
+        else:
+            st.session_state[key] = pd.DataFrame()
+
 
 # =========================================================
 # 2. 최종 표준 컬럼 정의
@@ -133,6 +130,7 @@ NUMERIC_COLUMNS = [
     "구매", "매출액", "장바구니담기수",
     "도달", "참여", "팔로우", "동영상조회",
 ]
+
 
 # =========================================================
 # 3. 매체별 컬럼 매핑
@@ -259,6 +257,7 @@ PLATFORM_MAPS = {
     "틱톡": TIKTOK_COLUMN_MAP,
 }
 
+
 # =========================================================
 # 4. 유틸 함수
 # =========================================================
@@ -270,13 +269,16 @@ def clean_column_name(col_name: str) -> str:
     col = re.sub(r"\s+", " ", col)
     return col
 
+
 def normalize_for_matching(col_name: str) -> str:
     col = clean_column_name(col_name).lower()
     col = re.sub(r"[^0-9a-zA-Z가-힣]", "", col)
     return col
 
+
 def build_normalized_map(column_map: Dict[str, str]) -> Dict[str, str]:
     return {normalize_for_matching(k): v for k, v in column_map.items()}
+
 
 def load_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
     encodings = ["utf-8-sig", "utf-8", "cp949", "euc-kr", "utf-16"]
@@ -297,12 +299,14 @@ def load_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
                 continue
     return None
 
+
 def load_excel_file(uploaded_file) -> Optional[pd.DataFrame]:
     try:
         uploaded_file.seek(0)
         return pd.read_excel(uploaded_file, engine="openpyxl")
     except Exception:
         return None
+
 
 def load_naver_excel_file(uploaded_file) -> Optional[pd.DataFrame]:
     try:
@@ -313,6 +317,7 @@ def load_naver_excel_file(uploaded_file) -> Optional[pd.DataFrame]:
         return df
     except Exception:
         return None
+
 
 def load_naver_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
     encodings = ["utf-8-sig", "utf-8", "cp949", "euc-kr", "utf-16"]
@@ -335,6 +340,7 @@ def load_naver_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
                 continue
     return None
 
+
 def load_file(uploaded_file, platform_name):
     if uploaded_file is None:
         return None
@@ -353,6 +359,7 @@ def load_file(uploaded_file, platform_name):
     df["매체"] = platform_name
     return df
 
+
 def convert_numeric_columns(df: pd.DataFrame, numeric_columns: List[str]) -> pd.DataFrame:
     df = df.copy()
     for col in numeric_columns:
@@ -369,12 +376,14 @@ def convert_numeric_columns(df: pd.DataFrame, numeric_columns: List[str]) -> pd.
             df[col] = pd.to_numeric(series, errors="coerce").fillna(0)
     return df
 
+
 def convert_date_column(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     if "날짜" in df.columns:
         parsed = pd.to_datetime(df["날짜"], errors="coerce")
         df["날짜"] = parsed.dt.strftime("%Y-%m-%d").fillna(df["날짜"].astype(str))
     return df
+
 
 def add_naver_actual_cost(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -388,6 +397,7 @@ def add_naver_actual_cost(df: pd.DataFrame) -> pd.DataFrame:
 
     df["실제 비용"] = pd.to_numeric(df["실제 비용"], errors="coerce").fillna(0)
     return df
+
 
 def standardize_columns(df, platform_name, column_map):
     df = df.copy()
@@ -416,17 +426,20 @@ def standardize_columns(df, platform_name, column_map):
     df = add_naver_actual_cost(df)
     return df
 
+
 def to_csv(df):
     return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
 
 def to_excel_multi_sheet(dfs_dict: dict) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         for sheet_name, df in dfs_dict.items():
-            if not df.empty:
+            if isinstance(df, pd.DataFrame) and not df.empty:
                 df.to_excel(writer, index=False, sheet_name=sheet_name[:31])
     buffer.seek(0)
     return buffer.getvalue()
+
 
 def to_excel(df, sheet_name="통합리포트"):
     buffer = io.BytesIO()
@@ -435,10 +448,12 @@ def to_excel(df, sheet_name="통합리포트"):
     buffer.seek(0)
     return buffer.getvalue()
 
+
 def safe_divide(numerator, denominator):
     if denominator in [0, None] or pd.isna(denominator):
         return 0
     return numerator / denominator
+
 
 def build_dashboard_df(df: pd.DataFrame) -> pd.DataFrame:
     dashboard_df = df.copy()
@@ -447,6 +462,7 @@ def build_dashboard_df(df: pd.DataFrame) -> pd.DataFrame:
     dashboard_df["날짜_dt"] = pd.to_datetime(dashboard_df["날짜"], errors="coerce")
     return dashboard_df
 
+
 def format_summary_for_display(df: pd.DataFrame) -> pd.DataFrame:
     display_df = df.copy()
 
@@ -454,17 +470,34 @@ def format_summary_for_display(df: pd.DataFrame) -> pd.DataFrame:
         if col in display_df.columns:
             display_df[col] = pd.to_numeric(display_df[col], errors="coerce").fillna(0)
 
-    metric_float_cols = ["CTR", "CPC", "CPA", "ROAS"]
+    metric_float_cols = ["CTR", "CPC", "CPA", "ROAS", "CVR"]
     for col in metric_float_cols:
         if col in display_df.columns:
             display_df[col] = pd.to_numeric(display_df[col], errors="coerce").fillna(0).round(2)
 
-    count_cols = ["비용", "실제 비용", "노출", "클릭", "구매", "매출액", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"]
+    count_cols = [
+        "비용", "실제 비용", "노출", "클릭", "구매", "매출액",
+        "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
+    ]
     for col in count_cols:
         if col in display_df.columns:
             display_df[col] = pd.to_numeric(display_df[col], errors="coerce").fillna(0)
 
     return display_df
+
+
+def combine_all_dataframes(df_list: List[pd.DataFrame]) -> pd.DataFrame:
+    valid_dfs = [df for df in df_list if isinstance(df, pd.DataFrame) and not df.empty]
+    if not valid_dfs:
+        return pd.DataFrame(columns=FINAL_COLUMNS)
+
+    final_df = pd.concat(valid_dfs, ignore_index=True)
+    final_df = final_df[FINAL_COLUMNS]
+    final_df = convert_numeric_columns(final_df, NUMERIC_COLUMNS)
+    final_df = convert_date_column(final_df)
+    final_df = add_naver_actual_cost(final_df)
+    return final_df
+
 
 def make_daily_summary(df: pd.DataFrame) -> pd.DataFrame:
     daily = (
@@ -475,7 +508,13 @@ def make_daily_summary(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
         .sort_values("날짜")
     )
-    return daily
+    if not daily.empty:
+        daily["CTR"] = daily.apply(lambda x: safe_divide(x["클릭"], x["노출"]) * 100, axis=1)
+        daily["CPC"] = daily.apply(lambda x: safe_divide(x["비용"], x["클릭"]), axis=1)
+        daily["CPA"] = daily.apply(lambda x: safe_divide(x["비용"], x["구매"]), axis=1)
+        daily["ROAS"] = daily.apply(lambda x: safe_divide(x["매출액"], x["비용"]) * 100, axis=1)
+    return format_summary_for_display(daily)
+
 
 def make_media_summary(df: pd.DataFrame) -> pd.DataFrame:
     media = (
@@ -492,8 +531,10 @@ def make_media_summary(df: pd.DataFrame) -> pd.DataFrame:
         media["CPC"] = media.apply(lambda x: safe_divide(x["비용"], x["클릭"]), axis=1)
         media["CPA"] = media.apply(lambda x: safe_divide(x["비용"], x["구매"]), axis=1)
         media["ROAS"] = media.apply(lambda x: safe_divide(x["매출액"], x["비용"]) * 100, axis=1)
+        media["CVR"] = media.apply(lambda x: safe_divide(x["구매"], x["클릭"]) * 100, axis=1)
 
     return format_summary_for_display(media)
+
 
 def make_campaign_summary(df: pd.DataFrame) -> pd.DataFrame:
     campaign = (
@@ -509,9 +550,11 @@ def make_campaign_summary(df: pd.DataFrame) -> pd.DataFrame:
         campaign["CPC"] = campaign.apply(lambda x: safe_divide(x["비용"], x["클릭"]), axis=1)
         campaign["CPA"] = campaign.apply(lambda x: safe_divide(x["비용"], x["구매"]), axis=1)
         campaign["ROAS"] = campaign.apply(lambda x: safe_divide(x["매출액"], x["비용"]) * 100, axis=1)
+        campaign["CVR"] = campaign.apply(lambda x: safe_divide(x["구매"], x["클릭"]) * 100, axis=1)
 
     campaign = campaign.sort_values("비용", ascending=False)
     return format_summary_for_display(campaign)
+
 
 # =========================================================
 # 5. 전일/전전일 요약
@@ -523,6 +566,7 @@ def get_latest_two_dates(df: pd.DataFrame):
     if len(valid_dates) == 1:
         return valid_dates.iloc[-1], None
     return valid_dates.iloc[-1], valid_dates.iloc[-2]
+
 
 def make_summary_row(df: pd.DataFrame, target_date: pd.Timestamp, label: str) -> pd.DataFrame:
     target_df = df[df["날짜_dt"].dt.normalize() == target_date].copy()
@@ -552,6 +596,7 @@ def make_summary_row(df: pd.DataFrame, target_date: pd.Timestamp, label: str) ->
         "CPC": safe_divide(cost, clicks),
         "구매": purchases,
         "CPA": safe_divide(cost, purchases),
+        "CVR": safe_divide(purchases, clicks) * 100,
         "매출액": sales,
         "ROAS": safe_divide(sales, cost) * 100,
         "장바구니담기수": cart,
@@ -562,6 +607,7 @@ def make_summary_row(df: pd.DataFrame, target_date: pd.Timestamp, label: str) ->
     }])
 
     return format_summary_for_display(summary)
+
 
 def make_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
     latest_date, previous_date = get_latest_two_dates(df)
@@ -577,6 +623,7 @@ def make_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
     previous_summary = make_summary_row(df, previous_date, "전전일")
     return format_summary_for_display(pd.concat([latest_summary, previous_summary], ignore_index=True))
 
+
 def make_media_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
     latest_date, previous_date = get_latest_two_dates(df)
     if latest_date is None:
@@ -584,7 +631,7 @@ def make_media_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
 
     cols_order = [
         "구분", "날짜", "매체", "비용", "실제 비용", "노출", "클릭", "CTR", "CPC",
-        "구매", "CPA", "매출액", "ROAS", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
+        "구매", "CPA", "CVR", "매출액", "ROAS", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
     ]
 
     def _make(df_day, label, date):
@@ -597,6 +644,7 @@ def make_media_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
         m["CTR"] = m.apply(lambda x: safe_divide(x["클릭"], x["노출"]) * 100, axis=1)
         m["CPC"] = m.apply(lambda x: safe_divide(x["비용"], x["클릭"]), axis=1)
         m["CPA"] = m.apply(lambda x: safe_divide(x["비용"], x["구매"]), axis=1)
+        m["CVR"] = m.apply(lambda x: safe_divide(x["구매"], x["클릭"]) * 100, axis=1)
         m["ROAS"] = m.apply(lambda x: safe_divide(x["매출액"], x["비용"]) * 100, axis=1)
         return format_summary_for_display(m)
 
@@ -610,6 +658,7 @@ def make_media_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
     prev_media = _make(prev_df, "전전일", previous_date)
     return format_summary_for_display(pd.concat([latest_media, prev_media], ignore_index=True))[cols_order]
 
+
 def make_campaign_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
     latest_date, previous_date = get_latest_two_dates(df)
     if latest_date is None:
@@ -617,7 +666,7 @@ def make_campaign_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
 
     cols_order = [
         "구분", "날짜", "매체", "캠페인명", "비용", "실제 비용", "노출", "클릭", "CTR", "CPC",
-        "구매", "CPA", "매출액", "ROAS", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
+        "구매", "CPA", "CVR", "매출액", "ROAS", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
     ]
 
     def _make(df_day, label, date):
@@ -630,6 +679,7 @@ def make_campaign_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
         c["CTR"] = c.apply(lambda x: safe_divide(x["클릭"], x["노출"]) * 100, axis=1)
         c["CPC"] = c.apply(lambda x: safe_divide(x["비용"], x["클릭"]), axis=1)
         c["CPA"] = c.apply(lambda x: safe_divide(x["비용"], x["구매"]), axis=1)
+        c["CVR"] = c.apply(lambda x: safe_divide(x["구매"], x["클릭"]) * 100, axis=1)
         c["ROAS"] = c.apply(lambda x: safe_divide(x["매출액"], x["비용"]) * 100, axis=1)
         c = c.sort_values("비용", ascending=False)
         return format_summary_for_display(c)
@@ -644,103 +694,114 @@ def make_campaign_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
     prev_c = _make(prev_df, "전전일", previous_date)
     return format_summary_for_display(pd.concat([latest_c, prev_c], ignore_index=True))[cols_order]
 
-# =========================================================
-# 6. AI 코멘트 생성
-# =========================================================
-def generate_ai_comment(total_df: pd.DataFrame, media_df: pd.DataFrame, campaign_df: pd.DataFrame) -> str:
-    if not OPENAI_AVAILABLE:
-        return "❌ openai 라이브러리가 설치되지 않았습니다. 터미널에서 'pip install openai' 를 실행해주세요."
 
+# =========================================================
+# 6. OpenAI 공통 함수
+# =========================================================
+def get_openai_client():
+    if not OPENAI_AVAILABLE:
+        return None
     try:
         api_key = st.secrets.get("OPENAI_API_KEY", "")
+        if not api_key:
+            return None
+        return OpenAI(api_key=api_key)
     except Exception:
-        api_key = ""
+        return None
 
-    if not api_key:
-        return "❌ OpenAI API 키가 설정되지 않았습니다. Streamlit Secrets에 OPENAI_API_KEY를 추가해주세요."
 
-    if total_df.empty:
-        return "❌ 분석할 데이터가 없습니다."
-
-    latest = total_df[total_df["구분"] == "전일"]
-    previous = total_df[total_df["구분"] == "전전일"]
-
-    if latest.empty:
-        return "❌ 전일 데이터가 없습니다."
-
-    latest_row = latest.iloc[0]
-    prev_row = previous.iloc[0] if not previous.empty else None
-    media_latest = media_df[media_df["구분"] == "전일"] if not media_df.empty else pd.DataFrame()
-    campaign_latest = campaign_df[campaign_df["구분"] == "전일"] if not campaign_df.empty else pd.DataFrame()
-    top_campaigns = campaign_latest.nlargest(3, "비용") if not campaign_latest.empty else pd.DataFrame()
-
-    prompt_data = f"""
-당신은 퍼포먼스 마케팅 전문 애널리스트입니다.
-아래 광고 성과 데이터를 분석하여 전문적이고 간결한 데일리 리포트 코멘트를 작성해주세요.
-
-=== 전일 전체 성과 ({latest_row['날짜']}) ===
-- 총 비용: {latest_row['비용']:,.0f}원
-- 총 매출액: {latest_row['매출액']:,.0f}원
-- ROAS: {latest_row['ROAS']:.1f}%
-- 구매수: {latest_row['구매']:,.0f}건
-- 클릭수: {latest_row['클릭']:,.0f}회
-- 노출수: {latest_row['노출']:,.0f}회
-- CTR: {latest_row['CTR']:.2f}%
-- CPC: {latest_row['CPC']:,.0f}원
-- CPA: {latest_row['CPA']:,.0f}원
-"""
-
-    if prev_row is not None:
-        cost_chg = ((latest_row['비용'] - prev_row['비용']) / prev_row['비용'] * 100) if prev_row['비용'] > 0 else 0
-        roas_chg = ((latest_row['ROAS'] - prev_row['ROAS']) / prev_row['ROAS'] * 100) if prev_row['ROAS'] > 0 else 0
-        purchase_chg = ((latest_row['구매'] - prev_row['구매']) / prev_row['구매'] * 100) if prev_row['구매'] > 0 else 0
-        sales_chg = ((latest_row['매출액'] - prev_row['매출액']) / prev_row['매출액'] * 100) if prev_row['매출액'] > 0 else 0
-
-        prompt_data += f"""
-=== 전전일 대비 증감 ({prev_row['날짜']} → {latest_row['날짜']}) ===
-- 비용 증감: {cost_chg:+.1f}%
-- 매출액 증감: {sales_chg:+.1f}%
-- ROAS 증감: {roas_chg:+.1f}%
-- 구매수 증감: {purchase_chg:+.1f}%
-"""
-
-    if not media_latest.empty:
-        prompt_data += "\n=== 매체별 성과 (전일) ===\n"
-        for _, row in media_latest.iterrows():
-            prompt_data += f"- {row['매체']}: 비용 {row['비용']:,.0f}원, ROAS {row['ROAS']:.1f}%, CPA {row['CPA']:,.0f}원\n"
-
-    if not top_campaigns.empty:
-        prompt_data += "\n=== 비용 TOP3 캠페인 (전일) ===\n"
-        for _, row in top_campaigns.iterrows():
-            prompt_data += f"- [{row['매체']}] {row['캠페인명']}: 비용 {row['비용']:,.0f}원, ROAS {row['ROAS']:.1f}%\n"
-
-    prompt_data += """
-=== 작성 가이드 ===
-1. 전체 성과 요약 (2-3문장): 핵심 지표 위주
-2. 전일 대비 변화 분석 (2-3문장): 눈에 띄는 증감과 원인 추론
-3. 매체별 하이라이트 (2-3문장): 주목할 매체와 이유
-4. 개선 제안 (1-2문장): 구체적이고 실행 가능한 제안
-
-전문적이고 간결하게, 한국어로 작성해주세요. 총 8-10문장 내외.
-"""
-
+def get_openai_model():
     try:
-        client = OpenAI(api_key=api_key)
+        return st.secrets.get("OPENAI_MODEL", "gpt-4o")
+    except Exception:
+        return "gpt-4o"
+
+
+def call_openai_text(system_prompt: str, user_prompt: str) -> str:
+    client = get_openai_client()
+    if client is None:
+        return "❌ OpenAI API를 사용할 수 없습니다. OPENAI_API_KEY 또는 openai 라이브러리를 확인해주세요."
+
+    model = get_openai_model()
+
+    # 최신 SDK 우선
+    try:
+        response = client.responses.create(
+            model=model,
+            instructions=system_prompt,
+            input=user_prompt,
+        )
+        return response.output_text
+    except Exception:
+        pass
+
+    # 구형/호환 SDK fallback
+    try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model=model,
             messages=[
-                {"role": "system", "content": "당신은 퍼포먼스 마케팅 전문 애널리스트입니다. 데이터를 정확하게 분석하고 인사이트를 도출합니다."},
-                {"role": "user", "content": prompt_data}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
-            temperature=0.7,
-            max_tokens=1000
+            temperature=0.4,
+            max_tokens=1200
         )
         return response.choices[0].message.content
     except Exception as e:
-        return f"❌ AI 코멘트 생성 실패: {str(e)}\n\nAPI 키와 네트워크 연결을 확인해주세요."
+        return f"❌ OpenAI 호출 실패: {str(e)}"
+
+
+def build_ai_context(total_df: pd.DataFrame, media_df: pd.DataFrame, campaign_df: pd.DataFrame) -> dict:
+    latest_total = total_df[total_df["구분"] == "전일"] if not total_df.empty else pd.DataFrame()
+    previous_total = total_df[total_df["구분"] == "전전일"] if not total_df.empty else pd.DataFrame()
+    latest_media = media_df[media_df["구분"] == "전일"] if not media_df.empty else pd.DataFrame()
+    latest_campaign = campaign_df[campaign_df["구분"] == "전일"] if not campaign_df.empty else pd.DataFrame()
+
+    context = {
+        "total_latest": latest_total.to_dict(orient="records"),
+        "total_previous": previous_total.to_dict(orient="records"),
+        "media_latest_top5": latest_media.head(5).to_dict(orient="records"),
+        "campaign_latest_top10": latest_campaign.head(10).to_dict(orient="records"),
+    }
+    return context
+
 
 # =========================================================
-# 7. 룰 기반 코멘트
+# 7. AI 코멘트 생성
+# =========================================================
+def generate_ai_comment(total_df: pd.DataFrame, media_df: pd.DataFrame, campaign_df: pd.DataFrame) -> str:
+    if total_df.empty:
+        return "❌ 분석할 데이터가 없습니다."
+
+    context = build_ai_context(total_df, media_df, campaign_df)
+
+    system_prompt = """
+당신은 퍼포먼스 마케팅 전문 애널리스트입니다.
+반드시 한국어로 답변하세요.
+과장 없이, 제공된 수치만 근거로 작성하세요.
+모르는 것은 모른다고 말하세요.
+
+출력 형식:
+1. 전체 성과 요약
+2. 전일 대비 변화
+3. 매체별 하이라이트
+4. 캠페인 인사이트
+5. 바로 실행할 액션 3개
+
+문장은 짧고 실무적으로 작성하세요.
+"""
+
+    user_prompt = f"""
+아래 광고 성과 데이터로 데일리 코멘트를 작성하세요.
+
+{json.dumps(context, ensure_ascii=False, indent=2)}
+"""
+
+    return call_openai_text(system_prompt, user_prompt)
+
+
+# =========================================================
+# 8. 룰 기반 코멘트
 # =========================================================
 def pct_change(curr, prev):
     if prev in [0, None] or pd.isna(prev):
@@ -748,6 +809,7 @@ def pct_change(curr, prev):
             return 0
         return None
     return ((curr - prev) / prev) * 100
+
 
 def change_word(value, up_word="증가", down_word="감소", flat_word="유사"):
     if value is None:
@@ -757,6 +819,7 @@ def change_word(value, up_word="증가", down_word="감소", flat_word="유사")
     if value < -0.5:
         return down_word
     return flat_word
+
 
 def metric_sentence(label, curr, prev, unit="", prefer_rate=True):
     diff = pct_change(curr, prev)
@@ -768,6 +831,7 @@ def metric_sentence(label, curr, prev, unit="", prefer_rate=True):
     if not prefer_rate:
         return f"{label}은(는) 전전일 대비 {word}하여 {curr_text}{unit}입니다."
     return f"{label}은(는) 전전일 대비 {word}하여 {curr_text}{unit}이며 증감률은 {diff:+.1f}%입니다."
+
 
 def get_top_media_insight(media_df: pd.DataFrame) -> str:
     if media_df.empty:
@@ -789,6 +853,7 @@ def get_top_media_insight(media_df: pd.DataFrame) -> str:
 
     return f"비용 비중이 가장 큰 매체는 {cost_media}이며, 해당 매체의 ROAS는 전전일 대비 {roas_word} 흐름을 보였습니다."
 
+
 def get_best_roas_media_insight(media_df: pd.DataFrame) -> str:
     if media_df.empty:
         return "매체별 ROAS 비교 데이터가 부족합니다."
@@ -802,6 +867,7 @@ def get_best_roas_media_insight(media_df: pd.DataFrame) -> str:
     best_row = latest.sort_values("ROAS", ascending=False).iloc[0]
     return f"전일 기준 ROAS가 가장 높은 매체는 {best_row['매체']}이며, ROAS는 {best_row['ROAS']:.1f}%입니다."
 
+
 def get_campaign_insight(campaign_df: pd.DataFrame) -> str:
     if campaign_df.empty:
         return "캠페인 비교 데이터가 부족합니다."
@@ -814,6 +880,7 @@ def get_campaign_insight(campaign_df: pd.DataFrame) -> str:
 
     top_campaign = latest.sort_values("매출액", ascending=False).iloc[0]
     return f"전일 매출액 기준 상위 캠페인은 {top_campaign['매체']}의 {top_campaign['캠페인명']}이며, 매출액은 {top_campaign['매출액']:,.0f}입니다."
+
 
 def generate_rule_based_comment(total_df: pd.DataFrame, media_df: pd.DataFrame, campaign_df: pd.DataFrame) -> str:
     if total_df.empty:
@@ -858,8 +925,42 @@ def generate_rule_based_comment(total_df: pd.DataFrame, media_df: pd.DataFrame, 
     ]
     return "\n\n".join(comments)
 
+
 # =========================================================
-# 8. 매체 API 연동 함수들
+# 9. 챗봇 응답 생성
+# =========================================================
+def generate_chatbot_answer(user_question: str, total_df: pd.DataFrame, media_df: pd.DataFrame, campaign_df: pd.DataFrame, history: list) -> str:
+    if total_df.empty:
+        return "현재 비교 데이터가 없어 답변드리기 어렵습니다."
+
+    context = build_ai_context(total_df, media_df, campaign_df)
+    recent_history = history[-6:] if history else []
+
+    system_prompt = """
+당신은 광고 성과 대시보드 안에서 동작하는 데이터 분석 챗봇입니다.
+반드시 한국어로 답변하세요.
+반드시 제공된 데이터만 근거로 답변하세요.
+추정은 최소화하세요.
+데이터에 없는 내용은 '현재 데이터 기준으로는 확인되지 않습니다'라고 답하세요.
+가능하면 수치를 포함해 짧고 실무적으로 설명하세요.
+"""
+
+    user_prompt = f"""
+[대시보드 데이터]
+{json.dumps(context, ensure_ascii=False, indent=2)}
+
+[최근 대화]
+{json.dumps(recent_history, ensure_ascii=False, indent=2)}
+
+[사용자 질문]
+{user_question}
+"""
+
+    return call_openai_text(system_prompt, user_prompt)
+
+
+# =========================================================
+# 10. 매체 API 연동 함수들
 # =========================================================
 def fetch_naver_api_data(start_date: str, end_date: str) -> pd.DataFrame:
     try:
@@ -870,7 +971,6 @@ def fetch_naver_api_data(start_date: str, end_date: str) -> pd.DataFrame:
         api_key = secret_key = customer_id = ""
 
     if not all([api_key, secret_key, customer_id]):
-        st.warning("⚠️ 네이버 API 키가 설정되지 않았습니다. Secrets에 NAVER_API_KEY, NAVER_SECRET_KEY, NAVER_CUSTOMER_ID를 추가하세요.")
         return pd.DataFrame()
 
     try:
@@ -925,13 +1025,11 @@ def fetch_naver_api_data(start_date: str, end_date: str) -> pd.DataFrame:
             if rows:
                 df = pd.DataFrame(rows)
                 return standardize_columns(df, "네이버", PLATFORM_MAPS["네이버"])
-        else:
-            st.error(f"네이버 API 오류: {response.status_code} - {response.text[:200]}")
-
     except Exception as e:
         st.error(f"네이버 API 연결 실패: {str(e)}")
 
     return pd.DataFrame()
+
 
 def fetch_kakao_api_data(start_date: str, end_date: str) -> pd.DataFrame:
     try:
@@ -940,7 +1038,6 @@ def fetch_kakao_api_data(start_date: str, end_date: str) -> pd.DataFrame:
         access_token = ""
 
     if not access_token:
-        st.warning("⚠️ 카카오 API 토큰이 설정되지 않았습니다. Secrets에 KAKAO_ACCESS_TOKEN을 추가하세요.")
         return pd.DataFrame()
 
     try:
@@ -953,7 +1050,6 @@ def fetch_kakao_api_data(start_date: str, end_date: str) -> pd.DataFrame:
         account_resp = requests.get(f"{base_url}/adAccounts", headers=headers, timeout=30)
 
         if account_resp.status_code != 200:
-            st.error(f"카카오 계정 조회 실패: {account_resp.status_code}")
             return pd.DataFrame()
 
         accounts = account_resp.json().get("content", [])
@@ -994,11 +1090,11 @@ def fetch_kakao_api_data(start_date: str, end_date: str) -> pd.DataFrame:
         if all_rows:
             df = pd.DataFrame(all_rows)
             return standardize_columns(df, "카카오", PLATFORM_MAPS["카카오"])
-
     except Exception as e:
         st.error(f"카카오 API 연결 실패: {str(e)}")
 
     return pd.DataFrame()
+
 
 def fetch_tiktok_api_data(start_date: str, end_date: str) -> pd.DataFrame:
     try:
@@ -1008,7 +1104,6 @@ def fetch_tiktok_api_data(start_date: str, end_date: str) -> pd.DataFrame:
         access_token = advertiser_id = ""
 
     if not all([access_token, advertiser_id]):
-        st.warning("⚠️ 틱톡 API 키가 설정되지 않았습니다. Secrets에 TIKTOK_ACCESS_TOKEN, TIKTOK_ADVERTISER_ID를 추가하세요.")
         return pd.DataFrame()
 
     try:
@@ -1025,8 +1120,7 @@ def fetch_tiktok_api_data(start_date: str, end_date: str) -> pd.DataFrame:
             "dimensions": ["campaign_id", "stat_time_day"],
             "metrics": [
                 "campaign_name", "spend", "impressions", "clicks",
-                "purchase", "complete_payment_roas", "conversion_rate",
-                "add_to_cart", "purchase_rate"
+                "purchase", "add_to_cart"
             ],
             "start_date": start_date,
             "end_date": end_date,
@@ -1065,15 +1159,11 @@ def fetch_tiktok_api_data(start_date: str, end_date: str) -> pd.DataFrame:
                 if rows:
                     df = pd.DataFrame(rows)
                     return standardize_columns(df, "틱톡", PLATFORM_MAPS["틱톡"])
-            else:
-                st.error(f"틱톡 API 오류: {result.get('message', '알 수 없는 오류')}")
-        else:
-            st.error(f"틱톡 API HTTP 오류: {response.status_code}")
-
     except Exception as e:
         st.error(f"틱톡 API 연결 실패: {str(e)}")
 
     return pd.DataFrame()
+
 
 def fetch_criteo_api_data(start_date: str, end_date: str) -> pd.DataFrame:
     try:
@@ -1083,7 +1173,6 @@ def fetch_criteo_api_data(start_date: str, end_date: str) -> pd.DataFrame:
         client_id = client_secret = ""
 
     if not all([client_id, client_secret]):
-        st.warning("⚠️ 크리테오 API 키가 설정되지 않았습니다. Secrets에 CRITEO_CLIENT_ID, CRITEO_CLIENT_SECRET을 추가하세요.")
         return pd.DataFrame()
 
     try:
@@ -1098,7 +1187,6 @@ def fetch_criteo_api_data(start_date: str, end_date: str) -> pd.DataFrame:
         )
 
         if token_response.status_code != 200:
-            st.error(f"크리테오 인증 실패: {token_response.status_code}")
             return pd.DataFrame()
 
         access_token = token_response.json().get("access_token")
@@ -1149,16 +1237,14 @@ def fetch_criteo_api_data(start_date: str, end_date: str) -> pd.DataFrame:
             if rows:
                 df = pd.DataFrame(rows)
                 return standardize_columns(df, "크리테오", PLATFORM_MAPS["크리테오"])
-        else:
-            st.error(f"크리테오 리포트 오류: {report_response.status_code}")
-
     except Exception as e:
         st.error(f"크리테오 API 연결 실패: {str(e)}")
 
     return pd.DataFrame()
 
+
 # =========================================================
-# 9. 대시보드 렌더링
+# 11. 대시보드 렌더링
 # =========================================================
 def render_dashboard(df: pd.DataFrame):
     dashboard_df = build_dashboard_df(df)
@@ -1264,6 +1350,7 @@ def render_dashboard(df: pd.DataFrame):
     cpc = safe_divide(total_cost, total_clicks)
     cpa = safe_divide(total_cost, total_purchases)
     roas = safe_divide(total_sales, total_cost) * 100
+    cvr = safe_divide(total_purchases, total_clicks) * 100
 
     st.markdown("### 📊 핵심 성과 지표")
 
@@ -1280,6 +1367,9 @@ def render_dashboard(df: pd.DataFrame):
     col8.metric("📊 CTR", f"{ctr:.2f}%")
     col9.metric("💲 CPC", f"₩{cpc:,.0f}")
     col10.metric("🛍️ 구매수", f"{total_purchases:,.0f}")
+
+    col11, _, _, _, _ = st.columns(5)
+    col11.metric("📌 CVR", f"{cvr:.2f}%")
 
     st.markdown("---")
 
@@ -1344,8 +1434,9 @@ def render_dashboard(df: pd.DataFrame):
     with sub_tab3:
         st.dataframe(filtered_df.drop(columns=["날짜_dt"], errors="ignore"), use_container_width=True)
 
+
 # =========================================================
-# 10. 코멘트 섹션
+# 12. 코멘트/챗봇 섹션
 # =========================================================
 def render_comment_data_section(df: pd.DataFrame):
     comparison_summary = make_comparison_summary(df)
@@ -1388,13 +1479,18 @@ def render_comment_data_section(df: pd.DataFrame):
             key="comparison_campaign_summary_download"
         )
 
+
 def render_daily_comment_section(df: pd.DataFrame):
     total_summary = make_comparison_summary(df)
     media_summary = make_media_comparison_summary(df)
     campaign_summary = make_campaign_comparison_summary(df)
 
+    if total_summary.empty:
+        st.warning("⚠️ AI 코멘트와 챗봇을 위해 비교 데이터가 필요합니다.")
+        return
+
     st.markdown("### 🤖 AI 데일리 코멘트")
-    st.markdown("GPT-4o가 데이터를 분석하여 전문적인 코멘트를 자동 생성합니다.")
+    st.markdown("OpenAI API로 전일/전전일 비교 데이터를 분석해 코멘트를 생성합니다.")
 
     ai_col1, ai_col2 = st.columns([1, 4])
     with ai_col1:
@@ -1405,7 +1501,7 @@ def render_daily_comment_section(df: pd.DataFrame):
             ai_comment = generate_ai_comment(total_summary, media_summary, campaign_summary)
             st.session_state["ai_comment"] = ai_comment
 
-    if "ai_comment" in st.session_state and st.session_state["ai_comment"]:
+    if st.session_state.get("ai_comment", ""):
         st.markdown(f"""
 <div style='background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
      color: #e8e8f0; padding: 24px; border-radius: 12px;
@@ -1424,8 +1520,6 @@ def render_daily_comment_section(df: pd.DataFrame):
 
     st.markdown("---")
     st.markdown("### 📋 룰 기반 데일리 코멘트")
-    st.markdown("사전 정의된 규칙으로 자동 생성됩니다.")
-
     rule_comment = generate_rule_based_comment(total_summary, media_summary, campaign_summary)
     st.text_area("룰 기반 코멘트 결과", value=rule_comment, height=220)
     st.download_button(
@@ -1436,19 +1530,51 @@ def render_daily_comment_section(df: pd.DataFrame):
         key="rule_comment_download"
     )
 
-# =========================================================
-# 11. 메인 UI
-# =========================================================
-tab1, tab2, tab3, tab4 = st.tabs([
-    "🔗 데이터 수집",
-    "📊 대시보드",
-    "📋 성과 비교 데이터",
-    "💬 데일리 코멘트",
-])
+    st.markdown("---")
+    st.markdown("### 💬 데이터 기반 AI 챗봇")
+    st.markdown("현재 전일/전전일 비교 데이터와 상위 매체/캠페인 데이터를 바탕으로 답변합니다.")
 
-with tab1:
+    if "ai_chat_history" not in st.session_state:
+        st.session_state["ai_chat_history"] = []
+
+    for msg in st.session_state["ai_chat_history"]:
+        with st.chat_message("user" if msg["role"] == "user" else "assistant"):
+            st.markdown(msg["content"])
+
+    user_question = st.chat_input("예: 어떤 매체가 ROAS가 가장 높았어? / 전일 대비 매출이 왜 변했을까?")
+
+    if user_question:
+        st.session_state["ai_chat_history"].append({"role": "user", "content": user_question})
+
+        with st.chat_message("user"):
+            st.markdown(user_question)
+
+        with st.chat_message("assistant"):
+            with st.spinner("답변 생성 중입니다..."):
+                answer = generate_chatbot_answer(
+                    user_question=user_question,
+                    total_df=total_summary,
+                    media_df=media_summary,
+                    campaign_df=campaign_summary,
+                    history=st.session_state["ai_chat_history"],
+                )
+                st.markdown(answer)
+
+        st.session_state["ai_chat_history"].append({"role": "assistant", "content": answer})
+
+    c1, c2 = st.columns([1, 5])
+    with c1:
+        if st.button("🧹 챗봇 대화 초기화", use_container_width=True):
+            st.session_state["ai_chat_history"] = []
+            st.rerun()
+
+
+# =========================================================
+# 13. 데이터 수집 UI
+# =========================================================
+def render_collection_tab():
     st.markdown("### 📅 수집 기간 설정")
-    d1, d2, d3 = st.columns([2, 2, 4])
+    d1, d2, _ = st.columns([2, 2, 4])
 
     with d1:
         start_date = st.date_input(
@@ -1466,237 +1592,153 @@ with tab1:
 
     st.markdown("---")
     st.markdown("### ⚡ API 자동 수집 (원클릭)")
-    st.markdown("아래 버튼 하나로 모든 연동된 매체의 데이터를 한번에 수집합니다.")
 
-    media_status_cols = st.columns(5)
-    media_labels = [
-        ("Meta", "meta_auto_df", "🟢"),
-        ("네이버", "naver_auto_df", "🟡"),
-        ("카카오", "kakao_auto_df", "🟡"),
-        ("틱톡", "tiktok_auto_df", "🟡"),
-        ("크리테오", "criteo_auto_df", "🟡"),
+    status_cols = st.columns(6)
+    status_items = [
+        ("Meta", "meta_auto_df"),
+        ("네이버", "naver_auto_df"),
+        ("카카오", "kakao_auto_df"),
+        ("틱톡", "tiktok_auto_df"),
+        ("크리테오", "criteo_auto_df"),
+        ("버즈빌", "buzzvil_auto_df"),
     ]
 
-    for i, (name, key, icon) in enumerate(media_labels):
-        with media_status_cols[i]:
-            has_data = not st.session_state.get(key, pd.DataFrame()).empty
-            status_color = "#28a745" if has_data else "#6c757d"
-            status_text = "수집완료" if has_data else "미수집"
-            st.markdown(f"""
-<div style='text-align:center; padding:10px; background:white;
-     border-radius:10px; border: 2px solid {status_color};'>
-    <div style='font-size:20px;'>{icon}</div>
-    <div style='font-weight:700; font-size:13px;'>{name}</div>
-    <div style='color:{status_color}; font-size:11px; font-weight:600;'>{status_text}</div>
-</div>
-""", unsafe_allow_html=True)
+    for col, (label, key) in zip(status_cols, status_items):
+        is_connected = not st.session_state[key].empty
+        badge = "연결됨" if is_connected else "미수집"
+        badge_class = "media-badge-connected" if is_connected else "media-badge-manual"
+        col.markdown(
+            f"<div class='{badge_class}' style='text-align:center; display:block;'>{label} · {badge}</div>",
+            unsafe_allow_html=True
+        )
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    col_a, col_b, col_c = st.columns([1.5, 1.5, 4])
 
-    if st.button("🚀 전체 매체 API 데이터 한번에 수집", type="primary", use_container_width=True):
-        progress = st.progress(0)
-        status_text_el = st.empty()
+    with col_a:
+        if st.button("🚀 자동 수집 실행", type="primary", use_container_width=True):
+            with st.spinner("API 데이터를 수집 중입니다..."):
+                st.session_state["meta_auto_df"] = fetch_meta_data(str(start_date), str(end_date))
+                st.session_state["naver_auto_df"] = fetch_naver_api_data(str(start_date), str(end_date))
+                st.session_state["kakao_auto_df"] = fetch_kakao_api_data(str(start_date), str(end_date))
+                st.session_state["tiktok_auto_df"] = fetch_tiktok_api_data(str(start_date), str(end_date))
+                st.session_state["criteo_auto_df"] = fetch_criteo_api_data(str(start_date), str(end_date))
+                st.success("자동 수집을 완료했습니다.")
 
-        apis = [
-            ("Meta", lambda: fetch_meta_data(str(start_date), str(end_date)), "meta_auto_df"),
-            ("네이버", lambda: fetch_naver_api_data(str(start_date), str(end_date)), "naver_auto_df"),
-            ("카카오", lambda: fetch_kakao_api_data(str(start_date), str(end_date)), "kakao_auto_df"),
-            ("틱톡", lambda: fetch_tiktok_api_data(str(start_date), str(end_date)), "tiktok_auto_df"),
-            ("크리테오", lambda: fetch_criteo_api_data(str(start_date), str(end_date)), "criteo_auto_df"),
-        ]
-
-        results = {}
-        for i, (name, fetch_fn, session_key) in enumerate(apis):
-            status_text_el.markdown(f"⏳ **{name}** 데이터 수집 중... ({i+1}/{len(apis)})")
-            try:
-                result_df = fetch_fn()
-                st.session_state[session_key] = result_df
-                results[name] = len(result_df) if not result_df.empty else 0
-            except Exception as e:
-                st.session_state[session_key] = pd.DataFrame()
-                results[name] = -1
-                st.warning(f"⚠️ {name} 수집 실패: {e}")
-            progress.progress((i + 1) / len(apis))
-        status_text_el.empty()
-        progress.empty()
-
-        success_count = sum(1 for v in results.values() if v > 0)
-        st.success(f"✅ 수집 완료! {success_count}/{len(apis)} 매체 성공")
-
-        for name, count in results.items():
-            if count > 0:
-                st.markdown(f"  - ✅ **{name}**: {count}개 행 수집")
-            elif count == 0:
-                st.markdown(f"  - ⚠️ **{name}**: 데이터 없음 (API 키 확인 필요)")
+    with col_b:
+        if st.button("🧩 통합 리포트 생성", use_container_width=True):
+            manual_dfs = st.session_state.get("manual_upload_dfs", [])
+            st.session_state["final_report_df"] = combine_all_dataframes(
+                [
+                    st.session_state["meta_auto_df"],
+                    st.session_state["naver_auto_df"],
+                    st.session_state["kakao_auto_df"],
+                    st.session_state["tiktok_auto_df"],
+                    st.session_state["criteo_auto_df"],
+                    st.session_state["buzzvil_auto_df"],
+                ] + manual_dfs
+            )
+            if st.session_state["final_report_df"].empty:
+                st.warning("통합할 데이터가 없습니다.")
             else:
-                st.markdown(f"  - ❌ **{name}**: 수집 실패")
-
-        st.rerun()
-
-    with st.expander("🔧 매체별 개별 수집"):
-        api_cols = st.columns(5)
-
-        with api_cols[0]:
-            if st.button("Meta 수집", use_container_width=True):
-                with st.spinner("Meta 수집 중..."):
-                    df = fetch_meta_data(str(start_date), str(end_date))
-                    st.session_state["meta_auto_df"] = df
-                    st.success(f"완료 ({len(df)}행)" if not df.empty else "데이터 없음")
-
-        with api_cols[1]:
-            if st.button("네이버 수집", use_container_width=True):
-                with st.spinner("네이버 수집 중..."):
-                    df = fetch_naver_api_data(str(start_date), str(end_date))
-                    st.session_state["naver_auto_df"] = df
-                    st.success(f"완료 ({len(df)}행)" if not df.empty else "데이터 없음")
-
-        with api_cols[2]:
-            if st.button("카카오 수집", use_container_width=True):
-                with st.spinner("카카오 수집 중..."):
-                    df = fetch_kakao_api_data(str(start_date), str(end_date))
-                    st.session_state["kakao_auto_df"] = df
-                    st.success(f"완료 ({len(df)}행)" if not df.empty else "데이터 없음")
-
-        with api_cols[3]:
-            if st.button("틱톡 수집", use_container_width=True):
-                with st.spinner("틱톡 수집 중..."):
-                    df = fetch_tiktok_api_data(str(start_date), str(end_date))
-                    st.session_state["tiktok_auto_df"] = df
-                    st.success(f"완료 ({len(df)}행)" if not df.empty else "데이터 없음")
-
-        with api_cols[4]:
-            if st.button("크리테오 수집", use_container_width=True):
-                with st.spinner("크리테오 수집 중..."):
-                    df = fetch_criteo_api_data(str(start_date), str(end_date))
-                    st.session_state["criteo_auto_df"] = df
-                    st.success(f"완료 ({len(df)}행)" if not df.empty else "데이터 없음")
+                st.success("통합 리포트를 생성했습니다.")
 
     st.markdown("---")
-    st.markdown("### 📁 RAW 파일 직접 업로드 (API 미연동 매체)")
+    st.markdown("### 📂 수동 업로드")
 
-    with st.expander("📂 파일 업로드 열기", expanded=False):
-        c1, c2 = st.columns(2)
+    if "manual_upload_dfs" not in st.session_state:
+        st.session_state["manual_upload_dfs"] = []
 
-        with c1:
-            naver = st.file_uploader("네이버 검색광고", type=["csv", "xlsx"], key="naver")
-            naver_gfa = st.file_uploader("네이버 성과형디스플레이", type=["csv", "xlsx"], key="naver_gfa")
-            kakao = st.file_uploader("카카오모먼트", type=["csv", "xlsx"], key="kakao")
-            buzzvil = st.file_uploader("버즈빌", type=["csv", "xlsx"], key="buzzvil")
+    upload_tabs = st.tabs(["메타", "네이버", "네이버 성과형디스플레이", "카카오", "틱톡", "크리테오", "버즈빌"])
 
-        with c2:
-            meta = st.file_uploader("메타 (파일)", type=["csv", "xlsx"], key="meta")
-            criteo = st.file_uploader("크리테오 (파일)", type=["csv", "xlsx"], key="criteo")
-            tiktok = st.file_uploader("틱톡 (파일)", type=["csv", "xlsx"], key="tiktok")
-
-    files = [
-        ("네이버", naver if 'naver' in dir() else None),
-        ("네이버 성과형디스플레이", naver_gfa if 'naver_gfa' in dir() else None),
-        ("메타", meta if 'meta' in dir() else None),
-        ("카카오", kakao if 'kakao' in dir() else None),
-        ("크리테오", criteo if 'criteo' in dir() else None),
-        ("버즈빌", buzzvil if 'buzzvil' in dir() else None),
-        ("틱톡", tiktok if 'tiktok' in dir() else None),
+    upload_configs = [
+        ("메타", META_COLUMN_MAP),
+        ("네이버", NAVER_COLUMN_MAP),
+        ("네이버 성과형디스플레이", NAVER_GFA_COLUMN_MAP),
+        ("카카오", KAKAO_COLUMN_MAP),
+        ("틱톡", TIKTOK_COLUMN_MAP),
+        ("크리테오", CRITEO_COLUMN_MAP),
+        ("버즈빌", BUZZVIL_COLUMN_MAP),
     ]
 
-    st.markdown("---")
-    st.markdown("### 📊 통합 리포트 생성")
+    new_manual_dfs = []
 
-    if st.button("📊 통합 리포트 생성하기", type="primary", use_container_width=True):
-        dfs = []
+    for tab, (platform_name, column_map) in zip(upload_tabs, upload_configs):
+        with tab:
+            uploaded_file = st.file_uploader(
+                f"{platform_name} 파일 업로드",
+                type=["csv", "xlsx"],
+                key=f"upload_{platform_name}"
+            )
 
-        api_session_keys = [
-            ("meta_auto_df", "메타"),
-            ("naver_auto_df", "네이버"),
-            ("kakao_auto_df", "카카오"),
-            ("tiktok_auto_df", "틱톡"),
-            ("criteo_auto_df", "크리테오"),
-        ]
-
-        for session_key, media_name in api_session_keys:
-            df_api = st.session_state.get(session_key, pd.DataFrame())
-
-            if not df_api.empty:
-                if "매체" not in df_api.columns:
-                    df_api["매체"] = media_name
-
-                if set(FINAL_COLUMNS).issubset(set(df_api.columns)):
-                    df_std = df_api[FINAL_COLUMNS].copy()
+            if uploaded_file is not None:
+                raw_df = load_file(uploaded_file, platform_name)
+                if raw_df is None:
+                    st.error("파일을 읽지 못했습니다.")
                 else:
-                    df_std = standardize_columns(df_api, media_name, PLATFORM_MAPS.get(media_name, META_COLUMN_MAP))
+                    std_df = standardize_columns(raw_df, platform_name, column_map)
+                    st.success(f"{platform_name} 파일 표준화 완료")
+                    st.dataframe(std_df.head(20), use_container_width=True)
+                    new_manual_dfs.append(std_df)
 
-                dfs.append(df_std)
+    st.session_state["manual_upload_dfs"] = new_manual_dfs
 
-        for name, file in files:
-            if file:
-                df = load_file(file, name)
-                if df is None:
-                    st.warning(f"⚠️ {name} 파일을 읽을 수 없습니다.")
-                    continue
-                df = standardize_columns(df, name, PLATFORM_MAPS[name])
-                dfs.append(df)
+    st.markdown("---")
+    st.markdown("### 📦 현재 통합 데이터")
 
-        if dfs:
-            final = pd.concat(dfs, ignore_index=True)
-            final = convert_numeric_columns(final, NUMERIC_COLUMNS)
-            final = convert_date_column(final)
-            final = add_naver_actual_cost(final)
+    final_df = st.session_state["final_report_df"]
 
-            dedup_cols = ["날짜", "매체", "캠페인명", "광고그룹명", "광고명"]
-            available_dedup = [c for c in dedup_cols if c in final.columns]
-            final = final.drop_duplicates(subset=available_dedup, keep="last")
+    if final_df.empty:
+        st.info("아직 통합 리포트가 없습니다. 자동 수집 또는 수동 업로드 후 통합 리포트를 생성해주세요.")
+    else:
+        st.dataframe(final_df, use_container_width=True, height=380)
 
-            st.session_state["final_report_df"] = final
+        dcol1, dcol2 = st.columns(2)
+        with dcol1:
+            st.download_button(
+                "📥 CSV 다운로드",
+                to_csv(final_df),
+                "final_report.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
 
-            st.success(f"✅ 통합 리포트 생성 완료! 총 {len(final):,}개 행, {final['매체'].nunique()}개 매체")
-            st.dataframe(final, use_container_width=True)
+        with dcol2:
+            st.download_button(
+                "📥 Excel 다운로드",
+                to_excel(final_df),
+                "final_report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
 
-            st.markdown("#### 📥 다운로드")
-            dl1, dl2 = st.columns(2)
 
-            with dl1:
-                st.download_button(
-                    "📊 CSV 다운로드",
-                    to_csv(final),
-                    f"unified_report_{start_date}_{end_date}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                    key="final_csv_download"
-                )
+# =========================================================
+# 14. 메인 UI
+# =========================================================
+tab1, tab2, tab3, tab4 = st.tabs([
+    "🔗 데이터 수집",
+    "📊 대시보드",
+    "📋 성과 비교 데이터",
+    "💬 데일리 코멘트",
+])
 
-            with dl2:
-                excel_data = to_excel_multi_sheet({
-                    "통합리포트": final,
-                    "매체별요약": make_media_summary(build_dashboard_df(final)),
-                    "캠페인별요약": make_campaign_summary(build_dashboard_df(final)),
-                    "일자별요약": make_daily_summary(build_dashboard_df(final)),
-                })
-                st.download_button(
-                    "📑 엑셀 다운로드 (멀티시트)",
-                    excel_data,
-                    f"unified_report_{start_date}_{end_date}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="final_excel_download"
-                )
-        else:
-            st.error("❌ 수집된 데이터가 없습니다. API 수집 또는 파일 업로드를 먼저 해주세요.")
+with tab1:
+    render_collection_tab()
 
 with tab2:
-    if not st.session_state["final_report_df"].empty:
-        render_dashboard(st.session_state["final_report_df"])
+    if st.session_state["final_report_df"].empty:
+        st.info("통합 리포트가 없습니다. 먼저 데이터 수집 탭에서 리포트를 생성해주세요.")
     else:
-        st.info("💡 먼저 '데이터 수집' 탭에서 통합 리포트를 생성해 주세요.")
+        render_dashboard(st.session_state["final_report_df"])
 
 with tab3:
-    if not st.session_state["final_report_df"].empty:
-        comment_df = build_dashboard_df(st.session_state["final_report_df"])
-        render_comment_data_section(comment_df)
+    if st.session_state["final_report_df"].empty:
+        st.info("통합 리포트가 없습니다. 먼저 데이터 수집 탭에서 리포트를 생성해주세요.")
     else:
-        st.info("💡 먼저 '데이터 수집' 탭에서 통합 리포트를 생성해 주세요.")
+        render_comment_data_section(build_dashboard_df(st.session_state["final_report_df"]))
 
 with tab4:
-    if not st.session_state["final_report_df"].empty:
-        comment_df = build_dashboard_df(st.session_state["final_report_df"])
-        render_daily_comment_section(comment_df)
+    if st.session_state["final_report_df"].empty:
+        st.info("통합 리포트가 없습니다. 먼저 데이터 수집 탭에서 리포트를 생성해주세요.")
     else:
-        st.info("💡 먼저 '데이터 수집' 탭에서 통합 리포트를 생성해 주세요.")
+        render_daily_comment_section(build_dashboard_df(st.session_state["final_report_df"]))
