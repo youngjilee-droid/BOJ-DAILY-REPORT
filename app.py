@@ -35,6 +35,7 @@ st.set_page_config(
 st.markdown("""
 <style>
     .main { background-color: #f8f9fa; }
+
     [data-testid="metric-container"] {
         background-color: white;
         border: 1px solid #e0e0e0;
@@ -42,17 +43,20 @@ st.markdown("""
         padding: 16px 20px;
         box-shadow: 0 2px 8px rgba(0,0,0,0.06);
     }
+
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px;
         background-color: #f0f2f6;
         padding: 6px;
         border-radius: 12px;
     }
+
     .stTabs [data-baseweb="tab"] {
         border-radius: 8px;
         padding: 8px 20px;
         font-weight: 600;
     }
+
     .filter-card {
         background: white;
         border-radius: 10px;
@@ -60,6 +64,7 @@ st.markdown("""
         margin-bottom: 12px;
         border: 1px solid #e8e8e8;
     }
+
     .media-badge-connected {
         background: #d4edda;
         color: #155724;
@@ -68,6 +73,7 @@ st.markdown("""
         font-size: 12px;
         font-weight: 600;
     }
+
     .media-badge-manual {
         background: #fff3cd;
         color: #856404;
@@ -76,6 +82,7 @@ st.markdown("""
         font-size: 12px;
         font-weight: 600;
     }
+
     .ai-comment-box {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         color: white;
@@ -83,10 +90,63 @@ st.markdown("""
         border-radius: 12px;
         line-height: 1.8;
     }
+
     .section-header {
         border-left: 4px solid #4f46e5;
         padding-left: 12px;
         margin: 20px 0 12px 0;
+    }
+
+    .status-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+        margin-bottom: 16px;
+    }
+
+    .status-card {
+        background: white;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        padding: 14px 16px;
+        text-align: center;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+    }
+
+    .status-title {
+        font-size: 14px;
+        font-weight: 700;
+        margin-bottom: 8px;
+        color: #111827;
+    }
+
+    .status-pill-connected {
+        display: inline-block;
+        background: #dcfce7;
+        color: #166534;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+    }
+
+    .status-pill-manual {
+        display: inline-block;
+        background: #fef3c7;
+        color: #92400e;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+    }
+
+    .action-wrap {
+        background: white;
+        border: 1px solid #e5e7eb;
+        border-radius: 12px;
+        padding: 16px;
+        margin-top: 8px;
+        margin-bottom: 12px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -724,7 +784,6 @@ def call_openai_text(system_prompt: str, user_prompt: str) -> str:
 
     model = get_openai_model()
 
-    # 최신 SDK 우선
     try:
         response = client.responses.create(
             model=model,
@@ -735,7 +794,6 @@ def call_openai_text(system_prompt: str, user_prompt: str) -> str:
     except Exception:
         pass
 
-    # 구형/호환 SDK fallback
     try:
         response = client.chat.completions.create(
             model=model,
@@ -1593,7 +1651,6 @@ def render_collection_tab():
     st.markdown("---")
     st.markdown("### ⚡ API 자동 수집 (원클릭)")
 
-    status_cols = st.columns(6)
     status_items = [
         ("Meta", "meta_auto_df"),
         ("네이버", "naver_auto_df"),
@@ -1603,44 +1660,68 @@ def render_collection_tab():
         ("버즈빌", "buzzvil_auto_df"),
     ]
 
-    for col, (label, key) in zip(status_cols, status_items):
+    status_html = "<div class='status-grid'>"
+    for label, key in status_items:
         is_connected = not st.session_state[key].empty
+        pill_class = "status-pill-connected" if is_connected else "status-pill-manual"
         badge = "연결됨" if is_connected else "미수집"
-        badge_class = "media-badge-connected" if is_connected else "media-badge-manual"
-        col.markdown(
-            f"<div class='{badge_class}' style='text-align:center; display:block;'>{label} · {badge}</div>",
-            unsafe_allow_html=True
+
+        status_html += f"""
+        <div class="status-card">
+            <div class="status-title">{label}</div>
+            <div class="{pill_class}">{badge}</div>
+        </div>
+        """
+    status_html += "</div>"
+
+    st.markdown(status_html, unsafe_allow_html=True)
+
+    st.markdown("<div class='action-wrap'>", unsafe_allow_html=True)
+    btn1, btn2, _ = st.columns([1.2, 1.2, 3.6])
+
+    auto_collect_clicked = False
+    create_report_clicked = False
+
+    with btn1:
+        auto_collect_clicked = st.button(
+            "🚀 자동 수집 실행",
+            type="primary",
+            use_container_width=True
         )
 
-    col_a, col_b, col_c = st.columns([1.5, 1.5, 4])
+    with btn2:
+        create_report_clicked = st.button(
+            "🧩 통합 리포트 생성",
+            use_container_width=True
+        )
 
-    with col_a:
-        if st.button("🚀 자동 수집 실행", type="primary", use_container_width=True):
-            with st.spinner("API 데이터를 수집 중입니다..."):
-                st.session_state["meta_auto_df"] = fetch_meta_data(str(start_date), str(end_date))
-                st.session_state["naver_auto_df"] = fetch_naver_api_data(str(start_date), str(end_date))
-                st.session_state["kakao_auto_df"] = fetch_kakao_api_data(str(start_date), str(end_date))
-                st.session_state["tiktok_auto_df"] = fetch_tiktok_api_data(str(start_date), str(end_date))
-                st.session_state["criteo_auto_df"] = fetch_criteo_api_data(str(start_date), str(end_date))
-                st.success("자동 수집을 완료했습니다.")
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    with col_b:
-        if st.button("🧩 통합 리포트 생성", use_container_width=True):
-            manual_dfs = st.session_state.get("manual_upload_dfs", [])
-            st.session_state["final_report_df"] = combine_all_dataframes(
-                [
-                    st.session_state["meta_auto_df"],
-                    st.session_state["naver_auto_df"],
-                    st.session_state["kakao_auto_df"],
-                    st.session_state["tiktok_auto_df"],
-                    st.session_state["criteo_auto_df"],
-                    st.session_state["buzzvil_auto_df"],
-                ] + manual_dfs
-            )
-            if st.session_state["final_report_df"].empty:
-                st.warning("통합할 데이터가 없습니다.")
-            else:
-                st.success("통합 리포트를 생성했습니다.")
+    if auto_collect_clicked:
+        with st.spinner("API 데이터를 수집 중입니다..."):
+            st.session_state["meta_auto_df"] = fetch_meta_data(str(start_date), str(end_date))
+            st.session_state["naver_auto_df"] = fetch_naver_api_data(str(start_date), str(end_date))
+            st.session_state["kakao_auto_df"] = fetch_kakao_api_data(str(start_date), str(end_date))
+            st.session_state["tiktok_auto_df"] = fetch_tiktok_api_data(str(start_date), str(end_date))
+            st.session_state["criteo_auto_df"] = fetch_criteo_api_data(str(start_date), str(end_date))
+            st.success("자동 수집을 완료했습니다.")
+
+    if create_report_clicked:
+        manual_dfs = st.session_state.get("manual_upload_dfs", [])
+        st.session_state["final_report_df"] = combine_all_dataframes(
+            [
+                st.session_state["meta_auto_df"],
+                st.session_state["naver_auto_df"],
+                st.session_state["kakao_auto_df"],
+                st.session_state["tiktok_auto_df"],
+                st.session_state["criteo_auto_df"],
+                st.session_state["buzzvil_auto_df"],
+            ] + manual_dfs
+        )
+        if st.session_state["final_report_df"].empty:
+            st.warning("통합할 데이터가 없습니다.")
+        else:
+            st.success("통합 리포트를 생성했습니다.")
 
     st.markdown("---")
     st.markdown("### 📂 수동 업로드")
