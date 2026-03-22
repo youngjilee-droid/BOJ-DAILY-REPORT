@@ -188,23 +188,21 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
             # ==============================
             st.warning(f"📦 API에서 받은 총 데이터 행 수: {len(data)}")
 
-            if len(data) == 0:
-                st.error("❌ Meta API가 데이터를 0건 반환했습니다. 날짜 범위나 계정 ID를 확인하세요.")
-            else:
-                first_item = data[0]
+            all_action_types = set()
+            all_action_value_types = set()
+            all_cost_types = set()
 
-                st.write("🔑 첫 번째 데이터 키 목록:", list(first_item.keys()))
-                st.write("📋 actions 전체:", first_item.get("actions", []))
-                st.write("💵 action_values 전체:", first_item.get("action_values", []))
-                st.write("💲 cost_per_action_type 전체:", first_item.get("cost_per_action_type", []))
+            for row in data:
+                for x in row.get("actions", []):
+                    all_action_types.add(x.get("action_type"))
+                for x in row.get("action_values", []):
+                    all_action_value_types.add(x.get("action_type"))
+                for x in row.get("cost_per_action_type", []):
+                    all_cost_types.add(x.get("action_type"))
 
-                action_types = [x.get("action_type") for x in first_item.get("actions", [])]
-                action_value_types = [x.get("action_type") for x in first_item.get("action_values", [])]
-                cost_types = [x.get("action_type") for x in first_item.get("cost_per_action_type", [])]
-
-                st.write("🧩 actions 안의 action_type 목록:", action_types)
-                st.write("🧩 action_values 안의 action_type 목록:", action_value_types)
-                st.write("🧩 cost_per_action_type 안의 action_type 목록:", cost_types)
+            st.write("🧩 전체 actions action_type 목록:", sorted(list(all_action_types)))
+            st.write("🧩 전체 action_values action_type 목록:", sorted(list(all_action_value_types)))
+            st.write("🧩 전체 cost_per_action_type action_type 목록:", sorted(list(all_cost_types)))
 
             st.stop()
             # ==============================
