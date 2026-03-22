@@ -55,7 +55,7 @@ def _extract_action_total(action_list, target_types):
 
     total = 0.0
     for item in action_list:
-        action_type = item.get("action_type", "")
+        action_type = item.get("action_type")
         if action_type in target_types:
             total += _safe_float(item.get("value", 0))
     return total
@@ -103,7 +103,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
 
     fields = [
         "date_start",
-        "date_stop",
         "campaign_name",
         "adset_name",
         "ad_name",
@@ -115,7 +114,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "action_values",
         "cost_per_action_type",
         "video_play_actions",
-        "purchase_roas",
     ]
 
     params = {
@@ -141,7 +139,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "offsite_conversion.fb_pixel_purchase",
         "onsite_web_purchase",
         "offsite_conversion.purchase",
-        "onsite_conversion.purchase",
     }
 
     add_to_cart_types = {
@@ -150,7 +147,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "offsite_conversion.fb_pixel_add_to_cart",
         "onsite_web_add_to_cart",
         "offsite_conversion.add_to_cart",
-        "onsite_conversion.add_to_cart",
     }
 
     follow_types = {
@@ -170,7 +166,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
     rows = []
     next_url = url
     next_params = params.copy()
-    debug_logged = False
 
     try:
         while next_url:
@@ -188,20 +183,33 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
 
             data = result.get("data", [])
 
-            # 첫 페이지만 가볍게 로그 표시
-            if not debug_logged:
-                st.info(f"📦 Meta API에서 받은 첫 페이지 데이터 행 수: {len(data)}")
+            # ==============================
+            # 디버깅 코드 시작
+            # ==============================
+            st.warning(f"📦 API에서 받은 총 데이터 행 수: {len(data)}")
 
-                if len(data) == 0:
-                    st.warning("Meta API가 데이터를 0건 반환했습니다. 날짜 범위나 계정 ID를 확인하세요.")
-                else:
-                    first_item = data[0]
-                    st.write("🔑 첫 번째 데이터 키 목록:", list(first_item.keys()))
-                    st.write("💰 spend 값:", first_item.get("spend"))
-                    st.write("📋 actions:", first_item.get("actions", "없음"))
-                    st.write("💵 action_values:", first_item.get("action_values", "없음"))
+            if len(data) == 0:
+                st.error("❌ Meta API가 데이터를 0건 반환했습니다. 날짜 범위나 계정 ID를 확인하세요.")
+            else:
+                first_item = data[0]
 
-                debug_logged = True
+                st.write("🔑 첫 번째 데이터 키 목록:", list(first_item.keys()))
+                st.write("📋 actions 전체:", first_item.get("actions", []))
+                st.write("💵 action_values 전체:", first_item.get("action_values", []))
+                st.write("💲 cost_per_action_type 전체:", first_item.get("cost_per_action_type", []))
+
+                action_types = [x.get("action_type") for x in first_item.get("actions", [])]
+                action_value_types = [x.get("action_type") for x in first_item.get("action_values", [])]
+                cost_types = [x.get("action_type") for x in first_item.get("cost_per_action_type", [])]
+
+                st.write("🧩 actions 안의 action_type 목록:", action_types)
+                st.write("🧩 action_values 안의 action_type 목록:", action_value_types)
+                st.write("🧩 cost_per_action_type 안의 action_type 목록:", cost_types)
+
+            st.stop()
+            # ==============================
+            # 디버깅 코드 끝
+            # ==============================
 
             for item in data:
                 actions = item.get("actions", [])
