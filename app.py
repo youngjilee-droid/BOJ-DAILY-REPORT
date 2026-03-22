@@ -1676,11 +1676,8 @@ def render_collection_tab():
 
     st.markdown(status_html, unsafe_allow_html=True)
 
-    st.markdown("<div class='action-wrap'>", unsafe_allow_html=True)
+    st.markdown("### 실행")
     btn1, btn2, _ = st.columns([1.2, 1.2, 3.6])
-
-    auto_collect_clicked = False
-    create_report_clicked = False
 
     with btn1:
         auto_collect_clicked = st.button(
