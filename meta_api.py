@@ -113,6 +113,7 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "reach",
         "actions",
         "action_values",
+        "cost_per_action_type",
         "video_play_actions",
         "purchase_roas",
     ]
