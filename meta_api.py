@@ -50,20 +50,40 @@ def _extract_action_total(action_list, target_types):
     return total
 
 
-def _extract_action_total_fuzzy(action_list, include_keywords):
+def _extract_action_first(action_list, priority_types):
     """
-    action_type 이름이 정확히 일치하지 않아도,
-    특정 키워드가 모두 포함되면 합산
+    여러 후보 중 첫 번째로 발견되는 값만 사용
+    중복 합산 방지용
     """
     if not isinstance(action_list, list):
         return 0.0
 
-    total = 0.0
+    action_map = {}
     for item in action_list:
-        action_type = str(item.get("action_type", "")).strip().lower()
-        if all(keyword.lower() in action_type for keyword in include_keywords):
-            total += _safe_float(item.get("value", 0))
-    return total
+        action_type = str(item.get("action_type", "")).strip()
+        action_map[action_type] = _safe_float(item.get("value", 0))
+
+    for action_type in priority_types:
+        if action_type in action_map:
+            return action_map[action_type]
+
+    return 0.0
+
+
+def _extract_action_first_fuzzy(action_list, priority_keywords):
+    """
+    정확한 이름이 다를 때 키워드 우선순위로 첫 값만 사용
+    예: ["shared", "purchase"] 포함 항목 우선
+    """
+    if not isinstance(action_list, list):
+        return 0.0
+
+    for keywords in priority_keywords:
+        for item in action_list:
+            action_type = str(item.get("action_type", "")).strip().lower()
+            if all(keyword.lower() in action_type for keyword in keywords):
+                return _safe_float(item.get("value", 0))
+    return 0.0
 
 
 def _request_meta_insights(url, params):
@@ -97,7 +117,7 @@ def fetch_meta_data(start_date, end_date):
 
     url = f"{BASE_URL}/{ad_account_id}/insights"
 
-    # 1) 협력광고 지표까지 포함한 우선 조회 필드
+    # 1) 협력광고 필드 우선 시도
     collaborative_fields = [
         "date_start",
         "date_stop",
@@ -113,7 +133,7 @@ def fetch_meta_data(start_date, end_date):
         "catalog_segment_value",
     ]
 
-    # 2) 실패 시 자동 복구용 안전 필드
+    # 2) 실패 시 안전 필드로 자동 폴백
     safe_fields = [
         "date_start",
         "date_stop",
@@ -138,6 +158,10 @@ def fetch_meta_data(start_date, end_date):
             {"since": start_date, "until": end_date},
             ensure_ascii=False,
         ),
+    }
+
+    link_click_types = {
+        "link_click",
     }
 
     add_to_cart_types = {
@@ -175,17 +199,17 @@ def fetch_meta_data(start_date, end_date):
         "onsite_web_initiate_checkout",
     }
 
-    # 협력광고 구매/매출용 후보
-    collaborative_purchase_exact_types = {
-        "purchase",
-        "omni_purchase",
+    # 구매/매출 우선순위
+    collaborative_purchase_priority = [
         "shared_items_purchase",
         "purchase_with_shared_items",
         "purchases_with_shared_items",
         "website_purchase_with_shared_items",
         "catalog_segment_purchase",
         "catalog_segment_omni_purchase",
-    }
+        "purchase",
+        "omni_purchase",
+    ]
 
     rows = []
     next_url = url
@@ -194,14 +218,12 @@ def fetch_meta_data(start_date, end_date):
 
     try:
         while next_url:
-            # 먼저 협력광고 필드 시도
             if use_collaborative_fields:
                 try:
                     collaborative_params = dict(next_params)
                     collaborative_params["fields"] = ",".join(collaborative_fields)
                     result = _request_meta_insights(next_url, collaborative_params)
                 except Exception:
-                    # 실패하면 자동으로 안전 필드로 폴백
                     use_collaborative_fields = False
                     safe_params = dict(next_params)
                     safe_params["fields"] = ",".join(safe_fields)
@@ -218,30 +240,45 @@ def fetch_meta_data(start_date, end_date):
                 catalog_actions = item.get("catalog_segment_actions", [])
                 catalog_values = item.get("catalog_segment_value", [])
 
+                # 클릭: 전체 clicks 대신 link_click 사용
+                link_clicks = _extract_action_total(actions, link_click_types)
+
                 add_to_cart = _extract_action_total(actions, add_to_cart_types)
                 follows = _extract_action_total(actions, follow_types)
                 engagement = _extract_action_total(actions, engagement_types)
                 video_views = _extract_action_total(actions, video_view_types)
                 initiate_checkout = _extract_action_total(actions, initiate_checkout_types)
 
-                # 구매: 협력광고 기준 우선
-                purchase = _extract_action_total(
-                    catalog_actions, collaborative_purchase_exact_types
+                # 구매: 합산하지 않고 우선순위 1개만 선택
+                purchase = _extract_action_first(
+                    catalog_actions,
+                    collaborative_purchase_priority
                 )
 
                 if purchase == 0:
-                    purchase = _extract_action_total_fuzzy(
-                        catalog_actions, ["purchase"]
+                    purchase = _extract_action_first_fuzzy(
+                        catalog_actions,
+                        [
+                            ["shared", "purchase"],
+                            ["purchase", "shared"],
+                            ["purchase"],
+                        ]
                     )
 
-                # 매출액: 협력광고 기준 우선
-                revenue = _extract_action_total(
-                    catalog_values, collaborative_purchase_exact_types
+                # 매출액: 합산하지 않고 우선순위 1개만 선택
+                revenue = _extract_action_first(
+                    catalog_values,
+                    collaborative_purchase_priority
                 )
 
                 if revenue == 0:
-                    revenue = _extract_action_total_fuzzy(
-                        catalog_values, ["purchase"]
+                    revenue = _extract_action_first_fuzzy(
+                        catalog_values,
+                        [
+                            ["shared", "purchase"],
+                            ["purchase", "shared"],
+                            ["purchase"],
+                        ]
                     )
 
                 rows.append(
@@ -253,7 +290,7 @@ def fetch_meta_data(start_date, end_date):
                         "비용": _safe_float(item.get("spend", 0)),
                         "실제 비용": "",
                         "노출": _safe_int(item.get("impressions", 0)),
-                        "클릭": _safe_int(item.get("clicks", 0)),
+                        "클릭": _safe_int(link_clicks),
                         "구매": purchase,
                         "매출액": revenue,
                         "장바구니담기수": add_to_cart,
