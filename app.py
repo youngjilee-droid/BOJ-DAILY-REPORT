@@ -9,15 +9,15 @@ API_VERSION = "v25.0"
 BASE_URL = f"https://graph.facebook.com/{API_VERSION}"
 
 
-def _validate_date(date_text: str) -> str:
+def _validate_date(date_text):
     try:
         datetime.strptime(date_text, "%Y-%m-%d")
         return date_text
-    except ValueError as e:
-        raise ValueError(f"날짜 형식이 잘못되었습니다: {date_text}") from e
+    except Exception:
+        raise ValueError(f"날짜 형식이 잘못되었습니다: {date_text}")
 
 
-def _normalize_ad_account_id(ad_account_id: str) -> str:
+def _normalize_ad_account_id(ad_account_id):
     ad_account_id = str(ad_account_id).strip()
     if not ad_account_id.startswith("act_"):
         ad_account_id = f"act_{ad_account_id}"
@@ -27,14 +27,14 @@ def _normalize_ad_account_id(ad_account_id: str) -> str:
 def _safe_int(value, default=0):
     try:
         return int(float(value))
-    except (TypeError, ValueError):
+    except Exception:
         return default
 
 
 def _safe_float(value, default=0.0):
     try:
         return float(value)
-    except (TypeError, ValueError):
+    except Exception:
         return default
 
 
@@ -50,30 +50,23 @@ def _extract_action_total(action_list, target_types):
     return total
 
 
-def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
+def fetch_meta_data(start_date, end_date):
     try:
         start_date = _validate_date(start_date)
         end_date = _validate_date(end_date)
-    except ValueError as e:
+    except Exception as e:
         st.error(str(e))
         return pd.DataFrame()
 
-    access_token = st.secrets.get("META_ACCESS_TOKEN", "").strip()
-    ad_account_id = _normalize_ad_account_id(
-        st.secrets.get("META_AD_ACCOUNT_ID", "").strip()
-    )
-
-    if not access_token:
-        st.error("META_ACCESS_TOKEN 값이 비어 있습니다.")
-        return pd.DataFrame()
-
-    if not ad_account_id or ad_account_id == "act_":
-        st.error("META_AD_ACCOUNT_ID 값이 비어 있습니다.")
+    try:
+        access_token = str(st.secrets["META_ACCESS_TOKEN"]).strip()
+        ad_account_id = _normalize_ad_account_id(st.secrets["META_AD_ACCOUNT_ID"])
+    except Exception:
+        st.error("Streamlit Secrets의 META_ACCESS_TOKEN 또는 META_AD_ACCOUNT_ID를 확인해주세요.")
         return pd.DataFrame()
 
     url = f"{BASE_URL}/{ad_account_id}/insights"
 
-    # 실제로 응답 확인된 최소 필드만 사용
     fields = [
         "date_start",
         "date_stop",
@@ -110,13 +103,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "onsite_conversion.add_to_cart",
     }
 
-    initiate_checkout_types = {
-        "initiate_checkout",
-        "omni_initiated_checkout",
-        "onsite_conversion.initiate_checkout",
-        "onsite_web_initiate_checkout",
-    }
-
     follow_types = {
         "follow",
         "follows",
@@ -138,7 +124,7 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
 
     rows = []
     next_url = url
-    next_params = params.copy()
+    next_params = params
 
     try:
         while next_url:
@@ -160,7 +146,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
                 actions = item.get("actions", [])
 
                 add_to_cart = _extract_action_total(actions, add_to_cart_types)
-                initiate_checkout = _extract_action_total(actions, initiate_checkout_types)
                 follows = _extract_action_total(actions, follow_types)
                 engagement = _extract_action_total(actions, engagement_types)
                 video_views = _extract_action_total(actions, video_view_types)
@@ -183,7 +168,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
                         "팔로우": follows,
                         "동영상조회": video_views,
                         "매체": "메타",
-                        "결제시작수": initiate_checkout,
                     }
                 )
 
@@ -191,9 +175,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
             next_url = paging.get("next")
             next_params = None
 
-    except requests.exceptions.RequestException as e:
-        st.error(f"Meta API 요청 실패: {e}")
-        return pd.DataFrame()
     except Exception as e:
         st.error(f"Meta 데이터 처리 중 오류 발생: {e}")
         return pd.DataFrame()
@@ -201,7 +182,13 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
     df = pd.DataFrame(rows)
 
     if df.empty:
-        return df
+        return pd.DataFrame(
+            columns=[
+                "날짜", "캠페인명", "광고그룹명", "광고명", "비용", "실제 비용",
+                "노출", "클릭", "구매", "매출액", "장바구니담기수",
+                "도달", "참여", "팔로우", "동영상조회", "매체"
+            ]
+        )
 
     ordered_cols = [
         "날짜",
@@ -220,8 +207,6 @@ def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
         "팔로우",
         "동영상조회",
         "매체",
-        "결제시작수",
     ]
 
-    existing_cols = [col for col in ordered_cols if col in df.columns]
-    return df[existing_cols]
+    return df[ordered_cols]
