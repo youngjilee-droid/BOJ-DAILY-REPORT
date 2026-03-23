@@ -39,6 +39,12 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+st.write("INDEX_SHEET_ID exists:", "INDEX_SHEET_ID" in st.secrets)
+st.write("gcp_service_account exists:", "gcp_service_account" in st.secrets)
+st.write(
+    "service account email:",
+    st.secrets.get("gcp_service_account", {}).get("client_email", "없음")
+)
 
 st.markdown("""
 <style>
