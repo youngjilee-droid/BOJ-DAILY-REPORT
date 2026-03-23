@@ -1660,20 +1660,21 @@ def render_collection_tab():
         ("버즈빌", "buzzvil_auto_df"),
     ]
 
-    status_html = "<div class='status-grid'>"
+    status_cards = []
     for label, key in status_items:
         is_connected = not st.session_state[key].empty
         pill_class = "status-pill-connected" if is_connected else "status-pill-manual"
         badge = "연결됨" if is_connected else "미수집"
 
-        status_html += f"""
-        <div class="status-card">
-            <div class="status-title">{label}</div>
-            <div class="{pill_class}">{badge}</div>
-        </div>
-        """
-    status_html += "</div>"
+        card_html = (
+            f'<div class="status-card">'
+            f'<div class="status-title">{label}</div>'
+            f'<div class="{pill_class}">{badge}</div>'
+            f'</div>'
+        )
+        status_cards.append(card_html)
 
+    status_html = f'<div class="status-grid">{"".join(status_cards)}</div>'
     st.markdown(status_html, unsafe_allow_html=True)
 
     st.markdown("### 실행")
