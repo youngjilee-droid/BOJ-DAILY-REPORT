@@ -552,23 +552,62 @@ GOOGLE_SHEETS_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
-def get_index_storage_mode() -> str:
-    service_info = get_google_service_account_info()
-    sheet_id = get_google_sheet_id()
-    if GSPREAD_AVAILABLE and service_info and sheet_id:
-        return "gsheets"
-    return "local"
+def normalize_service_account_info(info):
+    if not info or not isinstance(info, dict):
+        return None
+    normalized = dict(info)
+    pk = normalized.get("private_key")
+    if isinstance(pk, str):
+        # JSON 문자열/Secrets 문자열 모두 허용
+        normalized["private_key"] = pk.replace("\r\n", "\n").replace("\n", "\n").strip()
+        if not normalized["private_key"].endswith("\n"):
+            normalized["private_key"] += "\n"
+    return normalized
+
 
 def get_google_service_account_info():
     try:
         if "GOOGLE_SERVICE_ACCOUNT" in st.secrets:
             raw = st.secrets["GOOGLE_SERVICE_ACCOUNT"]
             if isinstance(raw, str):
-                return json.loads(raw)
-            return dict(raw)
-    except Exception:
+                return normalize_service_account_info(json.loads(raw))
+            return normalize_service_account_info(dict(raw))
+        if "gcp_service_account" in st.secrets:
+            return normalize_service_account_info(dict(st.secrets["gcp_service_account"]))
+    except Exception as e:
+        try:
+            st.error(f"서비스 계정 파싱 실패: {e}")
+        except Exception:
+            pass
         return None
     return None
+
+
+def get_index_storage_mode_details() -> dict:
+    service_info = get_google_service_account_info()
+    sheet_id = get_google_sheet_id()
+    details = {
+        "gspread_available": GSPREAD_AVAILABLE,
+        "has_service_info": service_info is not None,
+        "has_sheet_id": bool(sheet_id),
+        "sheet_id": sheet_id,
+        "mode": "local",
+        "reason": None,
+    }
+    if not GSPREAD_AVAILABLE:
+        details["reason"] = "gspread_not_installed"
+    elif service_info is None:
+        details["reason"] = "service_account_missing_or_parse_failed"
+    elif not sheet_id:
+        details["reason"] = "sheet_id_missing"
+    else:
+        details["mode"] = "gsheets"
+        details["reason"] = "ready"
+    return details
+
+
+def get_index_storage_mode() -> str:
+    return get_index_storage_mode_details()["mode"]
 
 def get_google_sheet_id():
     try:
@@ -680,6 +719,7 @@ def gs_save_index(df: pd.DataFrame, debug: bool = False):
 
 
 def inspect_gsheets_connection():
+    mode_details = get_index_storage_mode_details()
     info = {
         "gspread_available": GSPREAD_AVAILABLE,
         "has_service_account": False,
@@ -689,6 +729,8 @@ def inspect_gsheets_connection():
         "service_email": None,
         "spreadsheet_title": None,
         "connection_ok": False,
+        "storage_mode": mode_details.get("mode"),
+        "storage_reason": mode_details.get("reason"),
         "error": None,
     }
     try:
