@@ -14,6 +14,13 @@ import pandas as pd
 import streamlit as st
 from meta_api import fetch_meta_data
 
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    GSPREAD_AVAILABLE = True
+except ImportError:
+    GSPREAD_AVAILABLE = False
+
 # =========================================================
 # 0. OpenAI 임포트
 # =========================================================
@@ -460,6 +467,48 @@ def add_naver_actual_cost(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+
+def apply_index_name_mapping(df: pd.DataFrame, platform_name: str) -> pd.DataFrame:
+    df = df.copy()
+
+    if platform_name not in ["네이버", "네이버 성과형디스플레이"]:
+        return df
+
+    if "광고명" not in df.columns:
+        return df
+
+    try:
+        index_df = dbg_load_index()
+        if index_df is None or index_df.empty:
+            return df
+
+        idx = dbg_standardize_index(index_df)
+        idx = idx[idx["매체"] == platform_name].copy()
+
+        if idx.empty:
+            return df
+
+        idx = idx[["소재ID_비교키", "실제소재명"]].drop_duplicates(subset=["소재ID_비교키"], keep="last")
+        df["_광고명_원본"] = df["광고명"].astype(str)
+        df["_광고명_비교키"] = df["_광고명_원본"].apply(dbg_clean_text).apply(dbg_compact_text)
+
+        df = df.merge(
+            idx,
+            how="left",
+            left_on="_광고명_비교키",
+            right_on="소재ID_비교키"
+        )
+
+        matched = df["실제소재명"].notna() & (df["실제소재명"] != "")
+        df.loc[matched, "광고명"] = df.loc[matched, "실제소재명"]
+
+        drop_cols = [c for c in ["_광고명_원본", "_광고명_비교키", "소재ID_비교키", "실제소재명"] if c in df.columns]
+        df = df.drop(columns=drop_cols)
+        return df
+
+    except Exception:
+        return df
+
 def standardize_columns(df, platform_name, column_map):
     df = df.copy()
     df.columns = [clean_column_name(c) for c in df.columns]
@@ -473,6 +522,7 @@ def standardize_columns(df, platform_name, column_map):
             rename_dict[col] = norm_map[norm]
 
     df = df.rename(columns=rename_dict)
+    df = apply_index_name_mapping(df, platform_name)
 
     for col in FINAL_COLUMNS:
         if col not in df.columns:
@@ -494,6 +544,97 @@ def standardize_columns(df, platform_name, column_map):
 # 4-A. 인덱스 매핑 디버그 유틸
 # =========================================================
 INDEX_FILE_PATH = "index_mapping.csv"
+
+
+INDEX_WORKSHEET_NAME = "index_mapping"
+GOOGLE_SHEETS_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+def get_index_storage_mode() -> str:
+    service_info = get_google_service_account_info()
+    sheet_id = get_google_sheet_id()
+    if GSPREAD_AVAILABLE and service_info and sheet_id:
+        return "gsheets"
+    return "local"
+
+def get_google_service_account_info():
+    try:
+        if "gcp_service_account" in st.secrets:
+            return dict(st.secrets["gcp_service_account"])
+        if "GOOGLE_SERVICE_ACCOUNT" in st.secrets:
+            raw = st.secrets["GOOGLE_SERVICE_ACCOUNT"]
+            if isinstance(raw, str):
+                return json.loads(raw)
+            return dict(raw)
+    except Exception:
+        return None
+    return None
+
+def get_google_sheet_id():
+    try:
+        if "INDEX_SHEET_ID" in st.secrets:
+            return str(st.secrets["INDEX_SHEET_ID"]).strip()
+        if "google_sheets" in st.secrets and "INDEX_SHEET_ID" in st.secrets["google_sheets"]:
+            return str(st.secrets["google_sheets"]["INDEX_SHEET_ID"]).strip()
+    except Exception:
+        return None
+    return None
+
+def get_google_sheet_worksheet_name():
+    try:
+        if "INDEX_WORKSHEET_NAME" in st.secrets:
+            return str(st.secrets["INDEX_WORKSHEET_NAME"]).strip() or INDEX_WORKSHEET_NAME
+        if "google_sheets" in st.secrets and "INDEX_WORKSHEET_NAME" in st.secrets["google_sheets"]:
+            return str(st.secrets["google_sheets"]["INDEX_WORKSHEET_NAME"]).strip() or INDEX_WORKSHEET_NAME
+    except Exception:
+        return INDEX_WORKSHEET_NAME
+    return INDEX_WORKSHEET_NAME
+
+def get_gspread_client():
+    service_info = get_google_service_account_info()
+    sheet_id = get_google_sheet_id()
+    if not (GSPREAD_AVAILABLE and service_info and sheet_id):
+        return None, None
+    creds = Credentials.from_service_account_info(service_info, scopes=GOOGLE_SHEETS_SCOPES)
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(sheet_id)
+    return client, spreadsheet
+
+def get_or_create_index_worksheet():
+    _, spreadsheet = get_gspread_client()
+    if spreadsheet is None:
+        return None
+    ws_name = get_google_sheet_worksheet_name()
+    try:
+        worksheet = spreadsheet.worksheet(ws_name)
+    except Exception:
+        worksheet = spreadsheet.add_worksheet(title=ws_name, rows=1000, cols=10)
+        worksheet.update("A1:C1", [["매체", "소재ID", "실제소재명"]])
+    return worksheet
+
+def gs_load_index():
+    worksheet = get_or_create_index_worksheet()
+    if worksheet is None:
+        return pd.DataFrame(columns=["매체", "소재ID", "실제소재명"])
+    records = worksheet.get_all_records()
+    if not records:
+        return pd.DataFrame(columns=["매체", "소재ID", "실제소재명"])
+    return pd.DataFrame(records)
+
+def gs_save_index(df: pd.DataFrame):
+    worksheet = get_or_create_index_worksheet()
+    if worksheet is None:
+        raise RuntimeError("Google Sheets 연결 정보를 찾지 못했습니다.")
+    save_df = df.copy()
+    for col in ["매체", "소재ID", "실제소재명"]:
+        if col not in save_df.columns:
+            save_df[col] = ""
+    save_df = save_df[["매체", "소재ID", "실제소재명"]].fillna("")
+    values = [save_df.columns.tolist()] + save_df.astype(str).values.tolist()
+    worksheet.clear()
+    worksheet.update(values=values, range_name="A1")
 
 def dbg_clean_text(x):
     if pd.isna(x):
@@ -559,13 +700,18 @@ def dbg_read_any_file(file):
         file_bytes = file.getvalue()
         for enc in ["utf-8-sig", "utf-8", "cp949", "euc-kr", "utf-16"]:
             try:
-                return pd.read_csv(io.BytesIO(file_bytes), encoding=enc, skiprows=1)
+                return pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
             except Exception:
                 continue
         raise ValueError("CSV 인코딩을 읽지 못했습니다.")
     return pd.read_excel(file)
 
 def dbg_load_index():
+    if get_index_storage_mode() == "gsheets":
+        try:
+            return gs_load_index()
+        except Exception:
+            return pd.DataFrame(columns=["매체", "소재ID", "실제소재명"])
     if os.path.exists(INDEX_FILE_PATH):
         try:
             return pd.read_csv(INDEX_FILE_PATH, encoding="utf-8-sig")
@@ -574,7 +720,10 @@ def dbg_load_index():
     return pd.DataFrame(columns=["매체", "소재ID", "실제소재명"])
 
 def dbg_save_index(df):
-    df.to_csv(INDEX_FILE_PATH, index=False, encoding="utf-8-sig")
+    if get_index_storage_mode() == "gsheets":
+        gs_save_index(df)
+    else:
+        df.to_csv(INDEX_FILE_PATH, index=False, encoding="utf-8-sig")
 
 def dbg_standardize_index(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
@@ -1866,6 +2015,56 @@ def render_daily_comment_section(df: pd.DataFrame):
             st.rerun()
 
 
+
+def render_index_management_tab():
+    st.markdown("### 🗂️ 인덱스 관리")
+    storage_mode = get_index_storage_mode()
+
+    if storage_mode == "gsheets":
+        st.success("Google Sheets 영구 저장 모드로 연결되었습니다.")
+        st.caption(f"시트 ID: {get_google_sheet_id()} / 워크시트: {get_google_sheet_worksheet_name()}")
+    else:
+        st.warning("현재 로컬 CSV 저장 모드입니다. Streamlit Cloud에서는 영구 저장이 보장되지 않습니다.")
+        st.caption("Google Sheets 연동을 사용하려면 Streamlit Secrets에 서비스 계정과 INDEX_SHEET_ID를 설정하세요.")
+
+    current_index = dbg_load_index()
+
+    up_col, info_col = st.columns([1.2, 1])
+    with up_col:
+        idx_file = st.file_uploader("인덱스 파일 업로드", type=["csv", "xlsx"], key="main_index_upload")
+        if idx_file is not None:
+            try:
+                uploaded_index = dbg_read_any_file(idx_file)
+                standardized = dbg_standardize_index(uploaded_index)
+                dbg_save_index(standardized)
+                current_index = standardized
+                st.success("인덱스를 저장했습니다.")
+            except Exception as e:
+                st.error(f"인덱스 저장 중 오류가 발생했습니다: {e}")
+
+    with info_col:
+        st.markdown("#### 필수 컬럼")
+        st.write("매체 / 소재ID / 실제소재명")
+        st.markdown("#### 저장 대상")
+        st.write("네이버 등 업로드 시 자동 참조")
+
+    st.markdown("#### 현재 인덱스")
+    st.dataframe(current_index, use_container_width=True, height=420)
+
+    d1, d2 = st.columns(2)
+    with d1:
+        if not current_index.empty:
+            st.download_button(
+                "📥 현재 인덱스 다운로드",
+                current_index.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+                "current_index.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+    with d2:
+        if st.button("🔄 인덱스 새로고침", use_container_width=True):
+            st.rerun()
+
 # =========================================================
 # 13. 데이터 수집 UI
 # =========================================================
@@ -2033,8 +2232,9 @@ def render_collection_tab():
 # =========================================================
 # 14. 메인 UI
 # =========================================================
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🔗 데이터 수집",
+    "🗂️ 인덱스 관리",
     "📊 대시보드",
     "📋 성과 비교 데이터",
     "💬 데일리 코멘트",
@@ -2045,6 +2245,9 @@ with tab1:
     render_collection_tab()
 
 with tab2:
+    render_index_management_tab()
+
+with tab3:
     if st.session_state["final_report_df"].empty:
         st.info("통합 리포트가 없습니다. 먼저 데이터 수집 탭에서 리포트를 생성해주세요.")
     else:
