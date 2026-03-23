@@ -635,6 +635,53 @@ def gs_save_index(df: pd.DataFrame):
     values = [save_df.columns.tolist()] + save_df.astype(str).values.tolist()
     worksheet.clear()
     worksheet.update(values=values, range_name="A1")
+    return {
+        "worksheet_title": worksheet.title,
+        "saved_rows": len(save_df),
+        "saved_columns": list(save_df.columns),
+    }
+
+
+def inspect_gsheets_connection():
+    info = {
+        "gspread_available": GSPREAD_AVAILABLE,
+        "has_service_account": False,
+        "has_sheet_id": False,
+        "sheet_id": None,
+        "worksheet_name": get_google_sheet_worksheet_name(),
+        "service_email": None,
+        "spreadsheet_title": None,
+        "connection_ok": False,
+        "error": None,
+    }
+    try:
+        service_info = get_google_service_account_info()
+        sheet_id = get_google_sheet_id()
+        info["has_service_account"] = service_info is not None
+        info["has_sheet_id"] = bool(sheet_id)
+        info["sheet_id"] = sheet_id
+        if service_info and isinstance(service_info, dict):
+            info["service_email"] = service_info.get("client_email")
+        client, spreadsheet = get_gspread_client()
+        if spreadsheet is not None:
+            info["connection_ok"] = True
+            info["spreadsheet_title"] = getattr(spreadsheet, "title", None)
+    except Exception as e:
+        info["error"] = str(e)
+    return info
+
+
+def load_index_with_source():
+    storage_mode = get_index_storage_mode()
+    if storage_mode == "gsheets":
+        try:
+            df = gs_load_index()
+            return df, "gsheets", None
+        except Exception as e:
+            local_df = pd.read_csv(INDEX_FILE_PATH, encoding="utf-8-sig") if os.path.exists(INDEX_FILE_PATH) else pd.DataFrame(columns=["매체", "소재ID", "실제소재명"])
+            return local_df, "local_fallback", str(e)
+    local_df = pd.read_csv(INDEX_FILE_PATH, encoding="utf-8-sig") if os.path.exists(INDEX_FILE_PATH) else pd.DataFrame(columns=["매체", "소재ID", "실제소재명"])
+    return local_df, "local", None
 
 def dbg_clean_text(x):
     if pd.isna(x):
@@ -2019,6 +2066,7 @@ def render_daily_comment_section(df: pd.DataFrame):
 def render_index_management_tab():
     st.markdown("### 🗂️ 인덱스 관리")
     storage_mode = get_index_storage_mode()
+    conn = inspect_gsheets_connection()
 
     if storage_mode == "gsheets":
         st.success("Google Sheets 영구 저장 모드로 연결되었습니다.")
@@ -2027,7 +2075,28 @@ def render_index_management_tab():
         st.warning("현재 로컬 CSV 저장 모드입니다. Streamlit Cloud에서는 영구 저장이 보장되지 않습니다.")
         st.caption("Google Sheets 연동을 사용하려면 Streamlit Secrets에 서비스 계정과 INDEX_SHEET_ID를 설정하세요.")
 
-    current_index = dbg_load_index()
+    with st.expander("연결 상태 확인", expanded=True):
+        c1, c2, c3 = st.columns(3)
+        c1.metric("서비스 계정", "있음" if conn["has_service_account"] else "없음")
+        c2.metric("INDEX_SHEET_ID", "있음" if conn["has_sheet_id"] else "없음")
+        c3.metric("Google Sheets 연결", "정상" if conn["connection_ok"] else "실패")
+        st.write("gspread 설치 여부:", conn["gspread_available"])
+        st.write("서비스 계정 이메일:", conn["service_email"] or "확인 불가")
+        st.write("대상 시트 ID:", conn["sheet_id"] or "없음")
+        st.write("대상 워크시트:", conn["worksheet_name"])
+        st.write("연결된 스프레드시트 제목:", conn["spreadsheet_title"] or "확인 불가")
+        if conn["error"]:
+            st.error(f"Google Sheets 연결 오류: {conn['error']}")
+
+    current_index, current_source, current_error = load_index_with_source()
+    if current_source == "gsheets":
+        st.info(f"현재 인덱스 로드 경로: Google Sheets ({len(current_index)}행)")
+    elif current_source == "local_fallback":
+        st.warning("Google Sheets 로드 실패로 로컬 CSV를 대신 불러왔습니다.")
+        if current_error:
+            st.error(f"로드 실패 원인: {current_error}")
+    else:
+        st.info(f"현재 인덱스 로드 경로: 로컬 CSV ({len(current_index)}행)")
 
     up_col, info_col = st.columns([1.2, 1])
     with up_col:
@@ -2036,9 +2105,38 @@ def render_index_management_tab():
             try:
                 uploaded_index = dbg_read_any_file(idx_file)
                 standardized = dbg_standardize_index(uploaded_index)
-                dbg_save_index(standardized)
-                current_index = standardized
-                st.success("인덱스를 저장했습니다.")
+
+                saved_mode = "local"
+                save_detail = None
+                save_error = None
+
+                if storage_mode == "gsheets":
+                    try:
+                        save_detail = gs_save_index(standardized)
+                        current_index = gs_load_index()
+                        saved_mode = "gsheets"
+                        st.success(f"Google Sheets 저장 성공: {save_detail['saved_rows']}행 / 워크시트 {save_detail['worksheet_title']}")
+                    except Exception as gs_error:
+                        save_error = str(gs_error)
+                        dbg_save_index(standardized)
+                        current_index = standardized
+                        saved_mode = "local_fallback"
+                        st.error(f"Google Sheets 저장 실패: {save_error}")
+                        st.warning("로컬 CSV로 대체 저장했습니다.")
+                else:
+                    dbg_save_index(standardized)
+                    current_index = standardized
+                    st.warning("Google Sheets 연결이 없어 로컬 CSV로 저장했습니다.")
+
+                st.write("저장 결과")
+                st.json({
+                    "requested_storage_mode": storage_mode,
+                    "actual_saved_mode": saved_mode,
+                    "saved_rows": int(len(standardized)),
+                    "worksheet_name": get_google_sheet_worksheet_name(),
+                    "sheet_id": get_google_sheet_id(),
+                    "error": save_error,
+                })
             except Exception as e:
                 st.error(f"인덱스 저장 중 오류가 발생했습니다: {e}")
 
@@ -2047,6 +2145,8 @@ def render_index_management_tab():
         st.write("매체 / 소재ID / 실제소재명")
         st.markdown("#### 저장 대상")
         st.write("네이버 등 업로드 시 자동 참조")
+        st.markdown("#### 확인 방법")
+        st.write("업로드 후 저장 결과와 현재 인덱스 로드 경로를 확인하세요")
 
     st.markdown("#### 현재 인덱스")
     st.dataframe(current_index, use_container_width=True, height=420)
