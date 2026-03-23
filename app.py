@@ -599,13 +599,25 @@ def get_google_sheet_worksheet_name():
     return INDEX_WORKSHEET_NAME
 
 def get_gspread_client():
+    st.write("1) get_gspread_client 진입")
+    
     service_info = get_google_service_account_info()
     sheet_id = get_google_sheet_id()
+    
+    st.write("2) service_info 존재 여부:", service_info is not None)
+    st.write("3) sheet_id:", sheet_id)
+    
     if not (GSPREAD_AVAILABLE and service_info and sheet_id):
         return None, None
     creds = Credentials.from_service_account_info(service_info, scopes=GOOGLE_SHEETS_SCOPES)
+    st.write("4) Credentials 생성 성공")
+    
     client = gspread.authorize(creds)
+    st.write("5) gspread.authorize 성공")
+    
     spreadsheet = client.open_by_key(sheet_id)
+    st.write("6) open_by_key 성공")
+    
     return client, spreadsheet
 
 def get_or_create_index_worksheet():
@@ -615,6 +627,14 @@ def get_or_create_index_worksheet():
     ws_name = get_google_sheet_worksheet_name()
     try:
         worksheet = spreadsheet.worksheet(ws_name)
+        st.write("7) worksheet 접근 성공:", INDEX_WORKSHEET_NAME)
+
+       ws.clear()
+       st.write("8) clear 성공")
+
+       ws.update("A1", values)
+       st.write("9) update 성공")
+    
     except Exception:
         worksheet = spreadsheet.add_worksheet(title=ws_name, rows=1000, cols=10)
         worksheet.update("A1:C1", [["매체", "소재ID", "실제소재명"]])
