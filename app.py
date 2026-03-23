@@ -559,7 +559,7 @@ def dbg_read_any_file(file):
         file_bytes = file.getvalue()
         for enc in ["utf-8-sig", "utf-8", "cp949", "euc-kr", "utf-16"]:
             try:
-                return pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
+                return pd.read_csv(io.BytesIO(file_bytes), encoding=enc, skiprows=1)
             except Exception:
                 continue
         raise ValueError("CSV 인코딩을 읽지 못했습니다.")
