@@ -561,8 +561,6 @@ def get_index_storage_mode() -> str:
 
 def get_google_service_account_info():
     try:
-        if "gcp_service_account" in st.secrets:
-            return dict(st.secrets["gcp_service_account"])
         if "GOOGLE_SERVICE_ACCOUNT" in st.secrets:
             raw = st.secrets["GOOGLE_SERVICE_ACCOUNT"]
             if isinstance(raw, str):
