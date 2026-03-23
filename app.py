@@ -401,15 +401,12 @@ def normalize_index_string(value) -> str:
     if pd.isna(value):
         return ""
     text = str(value)
-    text = text.replace("﻿", "")
-    text = text.replace(" ", " ")
-    text = text.replace("​", "")
-    text = text.replace("
-", " ").replace("
-", " ").replace("	", " ")
+    text = text.replace("\ufeff", "")
+    text = text.replace("\xa0", " ")
+    text = text.replace("\u200b", "")
+    text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
     text = re.sub(r"\s+", " ", text)
     return text.strip()
-
 
 
 def normalize_creative_id(value) -> str:
