@@ -377,28 +377,82 @@ def save_index_file(df: pd.DataFrame) -> None:
     save_df.to_csv(INDEX_FILE_PATH, index=False, encoding="utf-8-sig")
 
 
+def canonical_platform_name(value: str) -> str:
+    raw = str(value or "").replace("﻿", "").strip()
+    key = normalize_for_matching(raw)
+    platform_aliases = {
+        "네이버": ["네이버", "naver", "naversa", "naversearchad", "naversearch", "searchad"],
+        "네이버 성과형디스플레이": ["네이버성과형디스플레이", "navergfa", "gfa", "성과형디스플레이", "네이버gfa"],
+        "메타": ["메타", "meta", "facebook", "fb", "instagram", "ig"],
+        "카카오": ["카카오", "kakao", "kakaomoment", "moment"],
+        "틱톡": ["틱톡", "tiktok", "tt"],
+        "크리테오": ["크리테오", "criteo"],
+        "버즈빌": ["버즈빌", "buzzvil"],
+    }
+    for canonical, aliases in platform_aliases.items():
+        normalized_aliases = {normalize_for_matching(a) for a in aliases + [canonical]}
+        if key in normalized_aliases:
+            return canonical
+    return raw
+
+
+
+def normalize_index_string(value) -> str:
+    if pd.isna(value):
+        return ""
+    text = str(value)
+    text = text.replace("﻿", "")
+    text = text.replace(" ", " ")
+    text = text.replace("​", "")
+    text = text.replace("
+", " ").replace("
+", " ").replace("	", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+
+def normalize_creative_id(value) -> str:
+    text = normalize_index_string(value)
+    return text.replace(" ", "")
+
+
+
 def normalize_index_df(df: pd.DataFrame) -> pd.DataFrame:
     normalized = df.copy()
     rename_candidates = {
         "media": "매체",
         "platform": "매체",
+        "매체명": "매체",
+        "channel": "매체",
         "소재": "소재ID",
+        "소재id": "소재ID",
+        "소재 id": "소재ID",
+        "소재코드": "소재ID",
         "광고id": "소재ID",
+        "광고 id": "소재ID",
         "adid": "소재ID",
+        "ad id": "소재ID",
         "creativeid": "소재ID",
         "creative id": "소재ID",
+        "creative": "소재ID",
         "nad": "소재ID",
         "실제소재": "실제소재명",
-        "소재명": "실제소재명",
+        "실제소재명": "실제소재명",
         "실제 소재명": "실제소재명",
+        "소재명": "실제소재명",
+        "리포트소재명": "실제소재명",
+        "보고용소재명": "실제소재명",
+        "reportname": "실제소재명",
         "report name": "실제소재명",
     }
+    normalized_rename_candidates = {normalize_for_matching(k): v for k, v in rename_candidates.items()}
 
     rename_dict = {}
     for col in normalized.columns:
-        norm = normalize_for_matching(col)
-        if norm in {normalize_for_matching(k): v for k, v in rename_candidates.items()}:
-            rename_dict[col] = {normalize_for_matching(k): v for k, v in rename_candidates.items()}[norm]
+        col_key = normalize_for_matching(normalize_index_string(col))
+        if col_key in normalized_rename_candidates:
+            rename_dict[col] = normalized_rename_candidates[col_key]
 
     normalized = normalized.rename(columns=rename_dict)
 
@@ -407,12 +461,14 @@ def normalize_index_df(df: pd.DataFrame) -> pd.DataFrame:
             normalized[col] = ""
 
     normalized = normalized[INDEX_COLUMNS].copy()
-    for col in INDEX_COLUMNS:
-        normalized[col] = normalized[col].astype(str).fillna("").str.strip()
+    normalized["매체"] = normalized["매체"].apply(canonical_platform_name)
+    normalized["소재ID"] = normalized["소재ID"].apply(normalize_creative_id)
+    normalized["실제소재명"] = normalized["실제소재명"].apply(normalize_index_string)
 
     normalized = normalized[(normalized["소재ID"] != "") | (normalized["실제소재명"] != "")].copy()
     normalized = normalized.drop_duplicates(subset=["매체", "소재ID"], keep="last")
-    return normalized
+    return normalized.reset_index(drop=True)
+
 
 
 def apply_index_mapping(df: pd.DataFrame, platform_name: str, index_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -423,31 +479,41 @@ def apply_index_mapping(df: pd.DataFrame, platform_name: str, index_df: pd.DataF
     if "광고ID" not in mapped.columns:
         mapped["광고ID"] = mapped["광고명"].astype(str)
 
+    mapped["광고ID"] = mapped["광고ID"].apply(normalize_creative_id)
+    mapped["광고명"] = mapped["광고명"].apply(normalize_index_string)
+
     if index_df is None or index_df.empty:
         unmapped = pd.DataFrame(columns=["매체", "광고ID"])
         return mapped, unmapped
 
     idx = normalize_index_df(index_df)
-    idx = idx[idx["매체"].astype(str).str.strip() == str(platform_name).strip()].copy()
+    normalized_platform = canonical_platform_name(platform_name)
+    idx = idx[idx["매체"] == normalized_platform].copy()
 
     if idx.empty:
         unmapped = mapped[["광고ID"]].drop_duplicates().copy()
-        unmapped.insert(0, "매체", platform_name)
+        unmapped.insert(0, "매체", normalized_platform)
         return mapped, unmapped
 
-    idx["소재ID_key"] = idx["소재ID"].astype(str).str.strip()
-    mapped["광고ID"] = mapped["광고ID"].astype(str).fillna("").str.strip()
-    mapped["소재ID_key"] = mapped["광고ID"]
+    idx["소재ID_key"] = idx["소재ID"].apply(normalize_creative_id)
+    mapped["소재ID_key"] = mapped["광고ID"].apply(normalize_creative_id)
 
     mapped = mapped.merge(
         idx[["소재ID_key", "실제소재명"]],
         how="left",
         on="소재ID_key"
     )
-    mapped["광고명"] = mapped["실제소재명"].fillna(mapped["광고명"])
 
-    unmapped = mapped[mapped["실제소재명"].isna() & mapped["광고ID"].astype(str).str.startswith("nad", na=False)][["광고ID"]].drop_duplicates().copy()
-    unmapped.insert(0, "매체", platform_name)
+    mapped["광고명"] = mapped["실제소재명"].where(
+        mapped["실제소재명"].notna() & (mapped["실제소재명"] != ""),
+        mapped["광고명"]
+    )
+
+    unmapped = mapped[
+        (mapped["실제소재명"].isna() | (mapped["실제소재명"] == ""))
+        & mapped["광고ID"].astype(str).str.startswith("nad", na=False)
+    ][["광고ID"]].drop_duplicates().copy()
+    unmapped.insert(0, "매체", normalized_platform)
 
     mapped = mapped.drop(columns=["실제소재명", "소재ID_key"], errors="ignore")
     return mapped, unmapped
