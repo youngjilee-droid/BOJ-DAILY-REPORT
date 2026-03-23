@@ -8,7 +8,7 @@ import re
 import requests
 import time
 from datetime import datetime, timedelta
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List
 
 import pandas as pd
 import streamlit as st
@@ -162,13 +162,10 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-INDEX_FILE_PATH = "index_mapping.csv"
-INDEX_COLUMNS = ["매체", "소재ID", "실제소재명"]
-
 for key in [
     "meta_auto_df", "naver_auto_df", "kakao_auto_df",
     "tiktok_auto_df", "criteo_auto_df", "buzzvil_auto_df",
-    "final_report_df", "ai_comment", "ai_chat_history", "index_df"
+    "final_report_df", "ai_comment", "ai_chat_history"
 ]:
     if key not in st.session_state:
         if key == "ai_chat_history":
@@ -178,21 +175,12 @@ for key in [
         else:
             st.session_state[key] = pd.DataFrame()
 
-if st.session_state["index_df"].empty:
-    if os.path.exists(INDEX_FILE_PATH):
-        try:
-            st.session_state["index_df"] = pd.read_csv(INDEX_FILE_PATH, encoding="utf-8-sig")
-        except Exception:
-            st.session_state["index_df"] = pd.DataFrame(columns=INDEX_COLUMNS)
-    else:
-        st.session_state["index_df"] = pd.DataFrame(columns=INDEX_COLUMNS)
-
 
 # =========================================================
 # 2. 최종 표준 컬럼 정의
 # =========================================================
 FINAL_COLUMNS = [
-    "날짜", "캠페인명", "광고그룹명", "광고ID", "광고명",
+    "날짜", "캠페인명", "광고그룹명", "광고명",
     "비용", "실제 비용", "노출", "클릭",
     "구매", "매출액", "장바구니담기수",
     "도달", "참여", "팔로우", "동영상조회", "매체",
@@ -353,169 +341,6 @@ def build_normalized_map(column_map: Dict[str, str]) -> Dict[str, str]:
     return {normalize_for_matching(k): v for k, v in column_map.items()}
 
 
-def load_index_file() -> pd.DataFrame:
-    if os.path.exists(INDEX_FILE_PATH):
-        try:
-            df = pd.read_csv(INDEX_FILE_PATH, encoding="utf-8-sig")
-        except Exception:
-            return pd.DataFrame(columns=INDEX_COLUMNS)
-    else:
-        return pd.DataFrame(columns=INDEX_COLUMNS)
-
-    for col in INDEX_COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
-    return df[INDEX_COLUMNS].fillna("")
-
-
-def save_index_file(df: pd.DataFrame) -> None:
-    save_df = df.copy()
-    for col in INDEX_COLUMNS:
-        if col not in save_df.columns:
-            save_df[col] = ""
-    save_df = save_df[INDEX_COLUMNS].fillna("")
-    save_df.to_csv(INDEX_FILE_PATH, index=False, encoding="utf-8-sig")
-
-
-def canonical_platform_name(value: str) -> str:
-    raw = str(value or "").replace("﻿", "").strip()
-    key = normalize_for_matching(raw)
-    platform_aliases = {
-        "네이버": ["네이버", "naver", "naversa", "naversearchad", "naversearch", "searchad"],
-        "네이버 성과형디스플레이": ["네이버성과형디스플레이", "navergfa", "gfa", "성과형디스플레이", "네이버gfa"],
-        "메타": ["메타", "meta", "facebook", "fb", "instagram", "ig"],
-        "카카오": ["카카오", "kakao", "kakaomoment", "moment"],
-        "틱톡": ["틱톡", "tiktok", "tt"],
-        "크리테오": ["크리테오", "criteo"],
-        "버즈빌": ["버즈빌", "buzzvil"],
-    }
-    for canonical, aliases in platform_aliases.items():
-        normalized_aliases = {normalize_for_matching(a) for a in aliases + [canonical]}
-        if key in normalized_aliases:
-            return canonical
-    return raw
-
-
-
-def normalize_index_string(value) -> str:
-    if pd.isna(value):
-        return ""
-    text = str(value)
-    text = text.replace("\ufeff", "")
-    text = text.replace("\xa0", " ")
-    text = text.replace("\u200b", "")
-    text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
-def normalize_creative_id(value) -> str:
-    text = normalize_index_string(value)
-    return text.replace(" ", "")
-
-
-
-def normalize_index_df(df: pd.DataFrame) -> pd.DataFrame:
-    normalized = df.copy()
-    rename_candidates = {
-        "media": "매체",
-        "platform": "매체",
-        "매체명": "매체",
-        "channel": "매체",
-        "소재": "소재ID",
-        "소재id": "소재ID",
-        "소재 id": "소재ID",
-        "소재코드": "소재ID",
-        "광고id": "소재ID",
-        "광고 id": "소재ID",
-        "adid": "소재ID",
-        "ad id": "소재ID",
-        "creativeid": "소재ID",
-        "creative id": "소재ID",
-        "creative": "소재ID",
-        "nad": "소재ID",
-        "실제소재": "실제소재명",
-        "실제소재명": "실제소재명",
-        "실제 소재명": "실제소재명",
-        "소재명": "실제소재명",
-        "리포트소재명": "실제소재명",
-        "보고용소재명": "실제소재명",
-        "reportname": "실제소재명",
-        "report name": "실제소재명",
-    }
-    normalized_rename_candidates = {normalize_for_matching(k): v for k, v in rename_candidates.items()}
-
-    rename_dict = {}
-    for col in normalized.columns:
-        col_key = normalize_for_matching(normalize_index_string(col))
-        if col_key in normalized_rename_candidates:
-            rename_dict[col] = normalized_rename_candidates[col_key]
-
-    normalized = normalized.rename(columns=rename_dict)
-
-    for col in INDEX_COLUMNS:
-        if col not in normalized.columns:
-            normalized[col] = ""
-
-    normalized = normalized[INDEX_COLUMNS].copy()
-    normalized["매체"] = normalized["매체"].apply(canonical_platform_name)
-    normalized["소재ID"] = normalized["소재ID"].apply(normalize_creative_id)
-    normalized["실제소재명"] = normalized["실제소재명"].apply(normalize_index_string)
-
-    normalized = normalized[(normalized["소재ID"] != "") | (normalized["실제소재명"] != "")].copy()
-    normalized = normalized.drop_duplicates(subset=["매체", "소재ID"], keep="last")
-    return normalized.reset_index(drop=True)
-
-
-
-def apply_index_mapping(df: pd.DataFrame, platform_name: str, index_df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    mapped = df.copy()
-
-    if "광고명" not in mapped.columns:
-        mapped["광고명"] = ""
-    if "광고ID" not in mapped.columns:
-        mapped["광고ID"] = mapped["광고명"].astype(str)
-
-    mapped["광고ID"] = mapped["광고ID"].apply(normalize_creative_id)
-    mapped["광고명"] = mapped["광고명"].apply(normalize_index_string)
-
-    if index_df is None or index_df.empty:
-        unmapped = pd.DataFrame(columns=["매체", "광고ID"])
-        return mapped, unmapped
-
-    idx = normalize_index_df(index_df)
-    normalized_platform = canonical_platform_name(platform_name)
-    idx = idx[idx["매체"] == normalized_platform].copy()
-
-    if idx.empty:
-        unmapped = mapped[["광고ID"]].drop_duplicates().copy()
-        unmapped.insert(0, "매체", normalized_platform)
-        return mapped, unmapped
-
-    idx["소재ID_key"] = idx["소재ID"].apply(normalize_creative_id)
-    mapped["소재ID_key"] = mapped["광고ID"].apply(normalize_creative_id)
-
-    mapped = mapped.merge(
-        idx[["소재ID_key", "실제소재명"]],
-        how="left",
-        on="소재ID_key"
-    )
-
-    mapped["광고명"] = mapped["실제소재명"].where(
-        mapped["실제소재명"].notna() & (mapped["실제소재명"] != ""),
-        mapped["광고명"]
-    )
-
-    unmapped = mapped[
-        (mapped["실제소재명"].isna() | (mapped["실제소재명"] == ""))
-        & mapped["광고ID"].astype(str).str.startswith("nad", na=False)
-    ][["광고ID"]].drop_duplicates().copy()
-    unmapped.insert(0, "매체", normalized_platform)
-
-    mapped = mapped.drop(columns=["실제소재명", "소재ID_key"], errors="ignore")
-    return mapped, unmapped
-
-
 def load_csv_file(uploaded_file) -> Optional[pd.DataFrame]:
     encodings = ["utf-8-sig", "utf-8", "cp949", "euc-kr", "utf-16"]
     separators = [None, ",", "\t", ";", "|"]
@@ -649,9 +474,6 @@ def standardize_columns(df, platform_name, column_map):
 
     df = df.rename(columns=rename_dict)
 
-    if "광고명" in df.columns and "광고ID" not in df.columns:
-        df["광고ID"] = df["광고명"].astype(str)
-
     for col in FINAL_COLUMNS:
         if col not in df.columns:
             if col in NUMERIC_COLUMNS:
@@ -665,6 +487,244 @@ def standardize_columns(df, platform_name, column_map):
     df = add_naver_actual_cost(df)
     return df
 
+
+
+
+# =========================================================
+# 4-A. 인덱스 매핑 디버그 유틸
+# =========================================================
+INDEX_FILE_PATH = "index_mapping.csv"
+
+def dbg_clean_text(x):
+    if pd.isna(x):
+        return ""
+    s = str(x)
+    s = s.replace("\ufeff", "")
+    s = s.replace("\u200b", "")
+    s = s.replace("\xa0", " ")
+    s = s.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+def dbg_compact_text(x):
+    return re.sub(r"\s+", "", dbg_clean_text(x))
+
+def dbg_normalize_media(x):
+    s = dbg_compact_text(x).lower()
+    media_map = {
+        "naver": "네이버",
+        "네이버": "네이버",
+        "meta": "메타",
+        "facebook": "메타",
+        "instagram": "메타",
+        "ig": "메타",
+        "kakao": "카카오",
+        "카카오": "카카오",
+        "tiktok": "틱톡",
+        "틱톡": "틱톡",
+        "gfa": "네이버 성과형디스플레이",
+        "네이버성과형디스플레이": "네이버 성과형디스플레이",
+        "criteo": "크리테오",
+        "크리테오": "크리테오",
+        "buzzvil": "버즈빌",
+        "버즈빌": "버즈빌",
+    }
+    return media_map.get(s, dbg_clean_text(x))
+
+def dbg_normalize_colname(col):
+    s = dbg_compact_text(col).lower()
+    mapping = {
+        "매체": "매체",
+        "media": "매체",
+        "platform": "매체",
+        "소재id": "소재ID",
+        "소재아이디": "소재ID",
+        "광고id": "광고ID",
+        "광고아이디": "광고ID",
+        "creativeid": "광고ID",
+        "adid": "광고ID",
+        "실제소재명": "실제소재명",
+        "실제광고명": "실제소재명",
+        "소재명": "실제소재명",
+        "mappedname": "실제소재명",
+        "광고명": "광고명",
+        "소재": "광고명",
+        "creativename": "광고명",
+        "adname": "광고명",
+    }
+    return mapping.get(s, dbg_clean_text(col))
+
+def dbg_read_any_file(file):
+    if file.name.lower().endswith(".csv"):
+        file_bytes = file.getvalue()
+        for enc in ["utf-8-sig", "utf-8", "cp949", "euc-kr", "utf-16"]:
+            try:
+                return pd.read_csv(io.BytesIO(file_bytes), encoding=enc)
+            except Exception:
+                continue
+        raise ValueError("CSV 인코딩을 읽지 못했습니다.")
+    return pd.read_excel(file)
+
+def dbg_load_index():
+    if os.path.exists(INDEX_FILE_PATH):
+        try:
+            return pd.read_csv(INDEX_FILE_PATH, encoding="utf-8-sig")
+        except Exception:
+            return pd.DataFrame(columns=["매체", "소재ID", "실제소재명"])
+    return pd.DataFrame(columns=["매체", "소재ID", "실제소재명"])
+
+def dbg_save_index(df):
+    df.to_csv(INDEX_FILE_PATH, index=False, encoding="utf-8-sig")
+
+def dbg_standardize_index(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    out.columns = [dbg_normalize_colname(c) for c in out.columns]
+    if "소재ID" not in out.columns and "광고ID" in out.columns:
+        out["소재ID"] = out["광고ID"]
+    for col in ["매체", "소재ID", "실제소재명"]:
+        if col not in out.columns:
+            out[col] = ""
+    out = out[["매체", "소재ID", "실제소재명"]].copy()
+    out["매체"] = out["매체"].apply(dbg_normalize_media)
+    out["소재ID_원본"] = out["소재ID"].astype(str)
+    out["소재ID"] = out["소재ID"].apply(dbg_clean_text)
+    out["소재ID_비교키"] = out["소재ID"].apply(dbg_compact_text)
+    out["실제소재명"] = out["실제소재명"].apply(dbg_clean_text)
+    out = out[(out["소재ID_비교키"] != "") & (out["실제소재명"] != "")]
+    out = out.drop_duplicates(subset=["매체", "소재ID_비교키"], keep="last")
+    return out
+
+def dbg_standardize_raw(df: pd.DataFrame, platform: str) -> pd.DataFrame:
+    out = df.copy()
+    out.columns = [dbg_normalize_colname(c) for c in out.columns]
+    if "광고ID" not in out.columns:
+        if "소재ID" in out.columns:
+            out["광고ID"] = out["소재ID"]
+        elif "광고명" in out.columns:
+            out["광고ID"] = out["광고명"]
+        else:
+            out["광고ID"] = ""
+    if "광고명" not in out.columns:
+        out["광고명"] = ""
+    out["광고ID_원본"] = out["광고ID"].astype(str)
+    out["광고ID"] = out["광고ID"].apply(dbg_clean_text)
+    out["광고ID_비교키"] = out["광고ID"].apply(dbg_compact_text)
+    out["광고명"] = out["광고명"].apply(dbg_clean_text)
+    out["매체"] = platform
+    return out
+
+def dbg_analyze_mapping(raw_df: pd.DataFrame, index_df: pd.DataFrame, platform: str):
+    raw = dbg_standardize_raw(raw_df, platform)
+    idx = dbg_standardize_index(index_df)
+    idx_p = idx[idx["매체"] == platform].copy()
+    merged = raw.merge(
+        idx_p[["매체", "소재ID_원본", "소재ID", "소재ID_비교키", "실제소재명"]],
+        how="left",
+        left_on="광고ID_비교키",
+        right_on="소재ID_비교키",
+        suffixes=("", "_index")
+    )
+    merged["매칭성공"] = merged["실제소재명"].notna() & (merged["실제소재명"] != "")
+    merged["광고명_원본"] = merged["광고명"]
+    merged["광고명"] = merged["실제소재명"].where(merged["매칭성공"], merged["광고명"])
+    raw_keys = set(raw["광고ID_비교키"].dropna().tolist())
+    idx_keys = set(idx_p["소재ID_비교키"].dropna().tolist())
+    only_raw = raw[~raw["광고ID_비교키"].isin(idx_keys)][["광고ID_원본", "광고ID", "광고ID_비교키", "광고명"]].drop_duplicates()
+    only_raw["실패원인"] = "RAW에는 있으나 인덱스에는 없음"
+    only_idx = idx_p[~idx_p["소재ID_비교키"].isin(raw_keys)][["소재ID_원본", "소재ID", "소재ID_비교키", "실제소재명"]].drop_duplicates()
+    only_idx["실패원인"] = "인덱스에는 있으나 RAW에는 없음"
+    suspicious_rows = []
+    for _, r in raw[["광고ID_원본", "광고ID", "광고ID_비교키", "광고명"]].drop_duplicates().iterrows():
+        raw_orig = str(r["광고ID_원본"])
+        raw_clean = str(r["광고ID"])
+        raw_compact = str(r["광고ID_비교키"])
+        same_compact = idx_p[idx_p["소재ID_비교키"] == raw_compact]
+        same_exact = idx_p[idx_p["소재ID"] == raw_clean]
+        if not same_compact.empty and same_exact.empty:
+            for _, m in same_compact.head(3).iterrows():
+                suspicious_rows.append({
+                    "RAW_광고ID_원본": raw_orig,
+                    "RAW_광고ID_정리": raw_clean,
+                    "RAW_비교키": raw_compact,
+                    "인덱스_소재ID_원본": m["소재ID_원본"],
+                    "인덱스_소재ID_정리": m["소재ID"],
+                    "인덱스_비교키": m["소재ID_비교키"],
+                    "실제소재명": m["실제소재명"],
+                    "추정원인": "공백/줄바꿈/숨은문자 차이 가능성"
+                })
+    suspicious_df = pd.DataFrame(suspicious_rows).drop_duplicates() if suspicious_rows else pd.DataFrame(columns=["RAW_광고ID_원본", "RAW_광고ID_정리", "RAW_비교키", "인덱스_소재ID_원본", "인덱스_소재ID_정리", "인덱스_비교키", "실제소재명", "추정원인"])
+    debug = {
+        "raw_rows": len(raw),
+        "index_rows_platform": len(idx_p),
+        "matched_rows": int(merged["매칭성공"].sum()),
+        "unmatched_rows": int((~merged["매칭성공"]).sum()),
+        "raw_unique_keys": int(raw["광고ID_비교키"].nunique()),
+        "index_unique_keys": int(idx_p["소재ID_비교키"].nunique()),
+        "common_keys": int(len(raw_keys.intersection(idx_keys))),
+    }
+    return merged, only_raw, only_idx, suspicious_df, debug
+
+def render_mapping_debug_tab():
+    st.markdown("## 🛠️ 매핑 실패 원인 디버그")
+    st.caption("기존 대시보드는 그대로 두고, 네이버 RAW와 인덱스 파일의 매칭 실패 원인을 별도 화면에서 확인합니다.")
+    subtab1, subtab2 = st.tabs(["인덱스 관리", "네이버 RAW 디버그"])
+    with subtab1:
+        st.subheader("인덱스 파일 업로드")
+        current_index = dbg_load_index()
+        idx_file = st.file_uploader("인덱스 파일 업로드", type=["csv", "xlsx"], key="debug_idx")
+        if idx_file is not None:
+            try:
+                uploaded_index = dbg_read_any_file(idx_file)
+                standardized = dbg_standardize_index(uploaded_index)
+                dbg_save_index(standardized)
+                current_index = standardized
+                st.success("인덱스를 저장했습니다.")
+            except Exception as e:
+                st.error(f"인덱스 파일 처리 중 오류가 발생했습니다: {e}")
+        st.write("현재 인덱스")
+        st.dataframe(current_index, use_container_width=True, height=320)
+        if not current_index.empty:
+            st.download_button("현재 인덱스 다운로드", current_index.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"), "current_index.csv", mime="text/csv", use_container_width=True)
+    with subtab2:
+        st.subheader("네이버 RAW 파일 업로드")
+        raw_file = st.file_uploader("네이버 RAW 업로드", type=["csv", "xlsx"], key="debug_raw")
+        if raw_file is not None:
+            try:
+                raw_df = dbg_read_any_file(raw_file)
+                index_df = dbg_load_index()
+                result_df, only_raw_df, only_idx_df, suspicious_df, debug = dbg_analyze_mapping(raw_df, index_df, "네이버")
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("RAW 행 수", debug["raw_rows"])
+                c2.metric("인덱스 행 수(네이버)", debug["index_rows_platform"])
+                c3.metric("매칭 행 수", debug["matched_rows"])
+                c4.metric("미매칭 행 수", debug["unmatched_rows"])
+                c5, c6, c7 = st.columns(3)
+                c5.metric("RAW 고유 키 수", debug["raw_unique_keys"])
+                c6.metric("인덱스 고유 키 수", debug["index_unique_keys"])
+                c7.metric("공통 키 수", debug["common_keys"])
+                st.markdown("### 1) 결과 미리보기")
+                preview_cols = [c for c in ["광고ID_원본", "광고ID", "광고명_원본", "광고명", "실제소재명", "매칭성공"] if c in result_df.columns]
+                st.dataframe(result_df[preview_cols + [c for c in result_df.columns if c not in preview_cols]], use_container_width=True, height=320)
+                st.markdown("### 2) RAW에는 있으나 인덱스에는 없는 값")
+                st.dataframe(only_raw_df, use_container_width=True, height=240)
+                st.markdown("### 3) 인덱스에는 있으나 RAW에는 없는 값")
+                st.dataframe(only_idx_df, use_container_width=True, height=240)
+                st.markdown("### 4) 공백/숨은문자 차이 의심 목록")
+                st.dataframe(suspicious_df, use_container_width=True, height=240)
+                st.markdown("### 5) 샘플 비교")
+                left, right = st.columns(2)
+                with left:
+                    st.write("RAW 광고ID 샘플")
+                    raw_sample = dbg_standardize_raw(raw_df, "네이버")[["광고ID_원본", "광고ID", "광고ID_비교키", "광고명"]].drop_duplicates().head(20)
+                    st.dataframe(raw_sample, use_container_width=True, height=300)
+                with right:
+                    st.write("인덱스 소재ID 샘플")
+                    idx_sample = dbg_standardize_index(index_df)
+                    idx_sample = idx_sample[idx_sample["매체"] == "네이버"][["소재ID_원본", "소재ID", "소재ID_비교키", "실제소재명"]].head(20)
+                    st.dataframe(idx_sample, use_container_width=True, height=300)
+                st.download_button("결과 CSV 다운로드", result_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig"), "mapping_debug_result.csv", mime="text/csv", use_container_width=True)
+            except Exception as e:
+                st.error(f"디버그 분석 중 오류가 발생했습니다: {e}")
 
 def to_csv(df):
     return df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
@@ -1901,57 +1961,6 @@ def render_collection_tab():
             st.success("통합 리포트를 생성했습니다.")
 
     st.markdown("---")
-    st.markdown("### 🗂️ 인덱스 관리")
-
-    current_index_df = normalize_index_df(st.session_state.get("index_df", load_index_file()))
-    st.session_state["index_df"] = current_index_df
-
-    idx_col1, idx_col2 = st.columns([1.4, 1])
-
-    with idx_col1:
-        index_upload = st.file_uploader(
-            "소재 매핑표 업로드 (CSV/XLSX)",
-            type=["csv", "xlsx"],
-            key="index_mapping_upload"
-        )
-
-        if index_upload is not None:
-            uploaded_index_df = load_csv_file(index_upload) if index_upload.name.lower().endswith(".csv") else load_excel_file(index_upload)
-            if uploaded_index_df is None:
-                st.error("인덱스 파일을 읽지 못했습니다.")
-            else:
-                normalized_index_df = normalize_index_df(uploaded_index_df)
-                st.session_state["index_df"] = normalized_index_df
-                save_index_file(normalized_index_df)
-                st.success("인덱스 파일을 저장했습니다.")
-
-        edited_index_df = st.data_editor(
-            st.session_state["index_df"],
-            use_container_width=True,
-            num_rows="dynamic",
-            key="index_editor"
-        )
-
-        save_index_clicked = st.button("💾 인덱스 저장", use_container_width=True)
-        if save_index_clicked:
-            normalized_edited_index = normalize_index_df(edited_index_df)
-            st.session_state["index_df"] = normalized_edited_index
-            save_index_file(normalized_edited_index)
-            st.success("인덱스를 저장했습니다.")
-
-    with idx_col2:
-        st.caption("필수 컬럼: 매체 / 소재ID / 실제소재명")
-        st.dataframe(st.session_state["index_df"], use_container_width=True, height=320)
-        st.download_button(
-            "📥 현재 인덱스 다운로드",
-            to_csv(st.session_state["index_df"]),
-            "index_mapping.csv",
-            mime="text/csv",
-            use_container_width=True,
-            key="download_index_mapping"
-        )
-
-    st.markdown("---")
     st.markdown("### 📂 수동 업로드")
 
     if "manual_upload_dfs" not in st.session_state:
@@ -1985,15 +1994,9 @@ def render_collection_tab():
                     st.error("파일을 읽지 못했습니다.")
                 else:
                     std_df = standardize_columns(raw_df, platform_name, column_map)
-                    mapped_df, unmapped_df = apply_index_mapping(std_df, platform_name, st.session_state.get("index_df", pd.DataFrame(columns=INDEX_COLUMNS)))
                     st.success(f"{platform_name} 파일 표준화 완료")
-                    st.dataframe(mapped_df.head(20), use_container_width=True)
-
-                    if not unmapped_df.empty:
-                        st.warning(f"{platform_name} 파일에서 인덱스와 매칭되지 않은 nad 소재ID가 있습니다.")
-                        st.dataframe(unmapped_df, use_container_width=True)
-
-                    new_manual_dfs.append(mapped_df)
+                    st.dataframe(std_df.head(20), use_container_width=True)
+                    new_manual_dfs.append(std_df)
 
     st.session_state["manual_upload_dfs"] = new_manual_dfs
 
@@ -2030,11 +2033,12 @@ def render_collection_tab():
 # =========================================================
 # 14. 메인 UI
 # =========================================================
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔗 데이터 수집",
     "📊 대시보드",
     "📋 성과 비교 데이터",
     "💬 데일리 코멘트",
+    "🛠️ 매핑 디버그",
 ])
 
 with tab1:
@@ -2057,3 +2061,6 @@ with tab4:
         st.info("통합 리포트가 없습니다. 먼저 데이터 수집 탭에서 리포트를 생성해주세요.")
     else:
         render_daily_comment_section(build_dashboard_df(st.session_state["final_report_df"]))
+
+with tab5:
+    render_mapping_debug_tab()
