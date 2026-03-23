@@ -39,12 +39,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-st.write("INDEX_SHEET_ID exists:", "INDEX_SHEET_ID" in st.secrets)
-st.write("gcp_service_account exists:", "gcp_service_account" in st.secrets)
-st.write(
-    "service account email:",
-    st.secrets.get("gcp_service_account", {}).get("client_email", "없음")
-)
 
 st.markdown("""
 <style>
@@ -598,46 +592,56 @@ def get_google_sheet_worksheet_name():
         return INDEX_WORKSHEET_NAME
     return INDEX_WORKSHEET_NAME
 
-def get_gspread_client():
-    st.write("1) get_gspread_client 진입")
-    
-    service_info = get_google_service_account_info()
-    sheet_id = get_google_sheet_id()
-    
-    st.write("2) service_info 존재 여부:", service_info is not None)
-    st.write("3) sheet_id:", sheet_id)
-    
-    if not (GSPREAD_AVAILABLE and service_info and sheet_id):
-        return None, None
-    creds = Credentials.from_service_account_info(service_info, scopes=GOOGLE_SHEETS_SCOPES)
-    st.write("4) Credentials 생성 성공")
-    
-    client = gspread.authorize(creds)
-    st.write("5) gspread.authorize 성공")
-    
-    spreadsheet = client.open_by_key(sheet_id)
-    st.write("6) open_by_key 성공")
-    
-    return client, spreadsheet
+def get_gspread_client(debug: bool = False):
+    try:
+        if debug:
+            st.write("1) get_gspread_client 진입")
+        service_info = get_google_service_account_info()
+        sheet_id = get_google_sheet_id()
+        if debug:
+            st.write("2) GSPREAD_AVAILABLE:", GSPREAD_AVAILABLE)
+            st.write("3) service_info 존재 여부:", service_info is not None)
+            st.write("4) sheet_id:", sheet_id)
+        if not (GSPREAD_AVAILABLE and service_info and sheet_id):
+            if debug:
+                st.write("❌ 조건 실패: GSPREAD_AVAILABLE 또는 service_info 또는 sheet_id 문제")
+            return None, None
+        creds = Credentials.from_service_account_info(service_info, scopes=GOOGLE_SHEETS_SCOPES)
+        if debug:
+            st.write("5) Credentials 생성 성공")
+        client = gspread.authorize(creds)
+        if debug:
+            st.write("6) gspread.authorize 성공")
+        spreadsheet = client.open_by_key(sheet_id)
+        if debug:
+            st.write("7) open_by_key 성공")
+        return client, spreadsheet
+    except Exception as e:
+        if debug:
+            st.error(f"❌ get_gspread_client 실패: {e}")
+        raise
 
-def get_or_create_index_worksheet():
-    _, spreadsheet = get_gspread_client()
+
+def get_or_create_index_worksheet(debug: bool = False):
+    _, spreadsheet = get_gspread_client(debug=debug)
     if spreadsheet is None:
+        if debug:
+            st.write("❌ spreadsheet 객체가 None 입니다.")
         return None
     ws_name = get_google_sheet_worksheet_name()
     try:
         worksheet = spreadsheet.worksheet(ws_name)
-        st.write("7) worksheet 접근 성공:", INDEX_WORKSHEET_NAME)
-
-       ws.clear()
-       st.write("8) clear 성공")
-
-       ws.update("A1", values)
-       st.write("9) update 성공")
-    
-    except Exception:
+        if debug:
+            st.write("8) worksheet 접근 성공:", ws_name)
+    except Exception as e:
+        if debug:
+            st.write(f"9) worksheet 접근 실패 → 새 워크시트 생성 시도: {e}")
         worksheet = spreadsheet.add_worksheet(title=ws_name, rows=1000, cols=10)
+        if debug:
+            st.write("10) worksheet 생성 성공:", ws_name)
         worksheet.update("A1:C1", [["매체", "소재ID", "실제소재명"]])
+        if debug:
+            st.write("11) 헤더 입력 성공")
     return worksheet
 
 def gs_load_index():
@@ -649,8 +653,8 @@ def gs_load_index():
         return pd.DataFrame(columns=["매체", "소재ID", "실제소재명"])
     return pd.DataFrame(records)
 
-def gs_save_index(df: pd.DataFrame):
-    worksheet = get_or_create_index_worksheet()
+def gs_save_index(df: pd.DataFrame, debug: bool = False):
+    worksheet = get_or_create_index_worksheet(debug=debug)
     if worksheet is None:
         raise RuntimeError("Google Sheets 연결 정보를 찾지 못했습니다.")
     save_df = df.copy()
@@ -659,8 +663,17 @@ def gs_save_index(df: pd.DataFrame):
             save_df[col] = ""
     save_df = save_df[["매체", "소재ID", "실제소재명"]].fillna("")
     values = [save_df.columns.tolist()] + save_df.astype(str).values.tolist()
+    if debug:
+        st.write("12) 저장할 데이터 행 수:", len(save_df))
+        st.write("13) 저장할 컬럼:", list(save_df.columns))
+        st.write("14) update range:", "A1")
+        st.write("15) values 첫 행:", values[0] if values else [])
     worksheet.clear()
-    worksheet.update(values=values, range_name="A1")
+    if debug:
+        st.write("16) worksheet clear 성공")
+    worksheet.update(range_name="A1", values=values)
+    if debug:
+        st.write("17) worksheet update 성공")
     return {
         "worksheet_title": worksheet.title,
         "saved_rows": len(save_df),
