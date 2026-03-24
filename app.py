@@ -13,6 +13,8 @@ from typing import Optional, Dict, List
 import pandas as pd
 import streamlit as st
 from meta_api import fetch_meta_data
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+from openpyxl.utils import get_column_letter
 
 try:
     import gspread
@@ -901,6 +903,213 @@ def safe_divide(numerator, denominator):
     if denominator in [0, None] or pd.isna(denominator):
         return 0
     return numerator / denominator
+
+def compute_report_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in ["비용", "실제 비용", "노출", "클릭", "구매", "매출액", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"]:
+        if col not in out.columns:
+            out[col] = 0
+        out[col] = pd.to_numeric(out[col], errors="coerce").fillna(0)
+
+    out["Spend"] = out["비용"]
+    out["Impression"] = out["노출"]
+    out["Click"] = out["클릭"]
+    out["CTR"] = out.apply(lambda x: safe_divide(x["Click"], x["Impression"]) * 100, axis=1)
+    out["CPC"] = out.apply(lambda x: safe_divide(x["Spend"], x["Click"]), axis=1)
+    out["CPM"] = out.apply(lambda x: safe_divide(x["Spend"], x["Impression"]) * 1000, axis=1)
+    out["구매 수"] = out["구매"]
+    out["CPA (구매)"] = out.apply(lambda x: safe_divide(x["Spend"], x["구매 수"]), axis=1)
+    out["CVR (구매)"] = out.apply(lambda x: safe_divide(x["구매 수"], x["Click"]) * 100, axis=1)
+    out["매출"] = out["매출액"]
+    out["AOV"] = out.apply(lambda x: safe_divide(x["매출"], x["구매 수"]), axis=1)
+    out["ROAS"] = out.apply(lambda x: safe_divide(x["매출"], x["Spend"]) * 100, axis=1)
+    return out
+
+
+def infer_landing(row: pd.Series) -> str:
+    text = " ".join([str(row.get("캠페인명", "")), str(row.get("광고그룹명", "")), str(row.get("광고명", ""))]).lower()
+    if any(k in text for k in ["olive", "oliveyoung", "올리브영", "oy"]):
+        return "OliveYoung"
+    if any(k in text for k in ["kakao", "카카오", "톡스토어", "선물하기"]):
+        return "Kakao"
+    if any(k in text for k in ["naver", "네이버", "brandstore", "브랜드스토어", "스마트스토어"]):
+        return "Naver"
+    return "기타"
+
+
+def build_total_sales_components(df: pd.DataFrame) -> dict:
+    if df.empty:
+        return {}
+
+    base = df.copy()
+    base = convert_numeric_columns(base, NUMERIC_COLUMNS)
+    base = convert_date_column(base)
+    base["날짜_dt"] = pd.to_datetime(base["날짜"], errors="coerce")
+    base = base.dropna(subset=["날짜_dt"]).copy()
+    if base.empty:
+        return {}
+
+    base["월"] = base["날짜_dt"].dt.strftime("%Y-%m")
+    base["주차"] = base["날짜_dt"].dt.strftime("%Y-W%U")
+    base["랜딩"] = base.apply(infer_landing, axis=1)
+
+    agg_cols = ["비용", "노출", "클릭", "구매", "매출액"]
+
+    def summarize(group_cols, sort_cols=None):
+        g = base.groupby(group_cols, dropna=False)[agg_cols].sum(numeric_only=True).reset_index()
+        g = compute_report_metrics(g)
+        cols = list(group_cols) + ["Spend", "Impression", "Click", "CTR", "CPC", "CPM", "구매 수", "CPA (구매)", "CVR (구매)", "매출", "AOV", "ROAS"]
+        g = g[cols]
+        if sort_cols:
+            g = g.sort_values(sort_cols, ascending=[False] * len(sort_cols))
+        return g
+
+    latest_date = base["날짜_dt"].max()
+    current_month = latest_date.strftime("%Y-%m")
+    current_month_df = base[base["월"] == current_month].copy()
+
+    current_month_media = current_month_df.groupby("매체", dropna=False)[agg_cols].sum(numeric_only=True).reset_index()
+    current_month_media = compute_report_metrics(current_month_media)
+    current_month_media["예산"] = 0
+    current_month_media["예상 매출"] = 0
+    current_month_media = current_month_media[["매체", "예산", "Spend", "Impression", "Click", "구매 수", "매출", "ROAS", "예상 매출"]]
+
+    sections = {
+        "sales_campaign_overview": summarize(["월"]),
+        "ongoing_campaign_overview": summarize(["랜딩"]),
+        "media_mtd": current_month_media,
+        "media_performance": summarize(["매체"], ["Spend"]),
+        "daily_performance": summarize(["날짜"], ["날짜"]),
+        "weekly_performance": summarize(["주차"], ["주차"]),
+        "landing_daily_performance": summarize(["랜딩", "날짜"]),
+        "plan_result": pd.DataFrame([
+            {"구분": "Plan", "내용": "직접 입력"},
+            {"구분": "E.Result", "내용": "직접 입력"},
+        ]),
+        "base": base,
+        "current_month": current_month,
+    }
+    return sections
+
+
+def autofit_worksheet(ws):
+    for col_cells in ws.columns:
+        length = 0
+        col_idx = col_cells[0].column
+        for cell in col_cells:
+            try:
+                length = max(length, len(str(cell.value)))
+            except Exception:
+                pass
+        ws.column_dimensions[get_column_letter(col_idx)].width = min(max(length + 2, 10), 28)
+
+
+def style_table(ws, start_row: int, start_col: int, df: pd.DataFrame, title: str = None):
+    thin = Side(style="thin", color="D9D9D9")
+    header_fill = PatternFill("solid", fgColor="1F4E78")
+    title_fill = PatternFill("solid", fgColor="D9EAF7")
+
+    if title:
+        end_col = start_col + max(len(df.columns), 1) - 1
+        ws.merge_cells(start_row=start_row, start_column=start_col, end_row=start_row, end_column=end_col)
+        cell = ws.cell(start_row, start_col, title)
+        cell.font = Font(bold=True, size=12)
+        cell.fill = title_fill
+        cell.alignment = Alignment(horizontal="left", vertical="center")
+        for c in range(start_col, end_col + 1):
+            ws.cell(start_row, c).border = Border(top=thin, left=thin, right=thin, bottom=thin)
+        start_row += 1
+
+    for idx, col_name in enumerate(df.columns, start=start_col):
+        cell = ws.cell(start_row, idx, col_name)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
+
+    for r_idx, row in enumerate(df.itertuples(index=False), start=start_row + 1):
+        for c_idx, value in enumerate(row, start=start_col):
+            cell = ws.cell(r_idx, c_idx, value)
+            cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
+            if isinstance(value, float):
+                if any(k in str(ws.cell(start_row, c_idx).value) for k in ["CTR", "CVR", "ROAS"]):
+                    cell.number_format = '0.00'
+                else:
+                    cell.number_format = '#,##0.00'
+            elif isinstance(value, int):
+                cell.number_format = '#,##0'
+
+
+def build_total_sales_excel(df: pd.DataFrame, index_df: Optional[pd.DataFrame] = None) -> bytes:
+    sections = build_total_sales_components(df)
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        if not sections:
+            pd.DataFrame({"안내": ["데이터가 없습니다."]}).to_excel(writer, index=False, sheet_name="Total Sales")
+            buffer.seek(0)
+            return buffer.getvalue()
+
+        wb = writer.book
+        ws = wb.create_sheet("Total Sales")
+        writer.sheets["Total Sales"] = ws
+        wb.remove(wb["Sheet"]) if "Sheet" in wb.sheetnames else None
+
+        ws["A1"] = "Total Sales"
+        ws["A1"].font = Font(size=16, bold=True)
+        ws["A2"] = f"기준월: {sections['current_month']}"
+
+        placements = [
+            (4, 1, "Sales Campaign Overview", sections["sales_campaign_overview"]),
+            (4, 16, "Ongoing Campaign Overview", sections["ongoing_campaign_overview"]),
+            (12, 1, "Plan / E.Result", sections["plan_result"]),
+            (12, 16, "매체 별 MTD", sections["media_mtd"]),
+            (22, 1, "매체 별 성과", sections["media_performance"]),
+            (40, 1, "일별 성과", sections["daily_performance"]),
+            (58, 1, "주차별 성과", sections["weekly_performance"]),
+            (76, 1, "랜딩별 일별 성과", sections["landing_daily_performance"]),
+        ]
+
+        for start_row, start_col, title, table_df in placements:
+            style_table(ws, start_row, start_col, table_df, title)
+
+        autofit_worksheet(ws)
+        ws.freeze_panes = "A4"
+
+        sections["base"].drop(columns=[c for c in ["날짜_dt", "월", "주차"] if c in sections["base"].columns]).to_excel(writer, index=False, sheet_name="RAW Data")
+        if index_df is None:
+            index_df = dbg_load_index()
+        if index_df is None or index_df.empty:
+            index_df = pd.DataFrame(columns=["매체", "소재ID", "실제소재명"])
+        index_df.to_excel(writer, index=False, sheet_name="INDEX")
+
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+def preview_total_sales_tables(df: pd.DataFrame):
+    sections = build_total_sales_components(df)
+    if not sections:
+        st.info("미리보기용 데이터가 없습니다.")
+        return
+
+    st.markdown("### 🧾 Total Sales 미리보기")
+    p1, p2 = st.tabs(["핵심 요약", "상세 테이블"])
+    with p1:
+        st.markdown("#### Sales Campaign Overview")
+        st.dataframe(sections["sales_campaign_overview"], use_container_width=True)
+        st.markdown("#### Ongoing Campaign Overview")
+        st.dataframe(sections["ongoing_campaign_overview"], use_container_width=True)
+        st.markdown("#### 매체 별 MTD")
+        st.dataframe(sections["media_mtd"], use_container_width=True)
+        st.markdown("#### 매체 별 성과")
+        st.dataframe(sections["media_performance"], use_container_width=True)
+    with p2:
+        st.markdown("#### 일별 성과")
+        st.dataframe(sections["daily_performance"], use_container_width=True, height=260)
+        st.markdown("#### 주차별 성과")
+        st.dataframe(sections["weekly_performance"], use_container_width=True, height=260)
+        st.markdown("#### 랜딩별 일별 성과")
+        st.dataframe(sections["landing_daily_performance"], use_container_width=True, height=320)
 
 
 def build_dashboard_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -2209,7 +2418,9 @@ def render_collection_tab():
     else:
         st.dataframe(final_df, use_container_width=True, height=380)
 
-        dcol1, dcol2 = st.columns(2)
+        preview_total_sales_tables(final_df)
+
+        dcol1, dcol2, dcol3 = st.columns(3)
         with dcol1:
             st.download_button(
                 "📥 CSV 다운로드",
@@ -2224,6 +2435,15 @@ def render_collection_tab():
                 "📥 Excel 다운로드",
                 to_excel(final_df),
                 "final_report.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
+
+        with dcol3:
+            st.download_button(
+                "📘 Total Sales 리포트 다운로드",
+                build_total_sales_excel(final_df, dbg_load_index()),
+                "daily_report_total_sales.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
@@ -2253,17 +2473,17 @@ with tab3:
     else:
         render_dashboard(st.session_state["final_report_df"])
 
-with tab3:
+with tab4:
     if st.session_state["final_report_df"].empty:
         st.info("통합 리포트가 없습니다. 먼저 데이터 수집 탭에서 리포트를 생성해주세요.")
     else:
         render_comment_data_section(build_dashboard_df(st.session_state["final_report_df"]))
 
-with tab4:
+with tab5:
     if st.session_state["final_report_df"].empty:
         st.info("통합 리포트가 없습니다. 먼저 데이터 수집 탭에서 리포트를 생성해주세요.")
     else:
         render_daily_comment_section(build_dashboard_df(st.session_state["final_report_df"]))
 
-with tab5:
+with tab6:
     render_mapping_debug_tab()
