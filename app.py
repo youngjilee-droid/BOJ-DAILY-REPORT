@@ -971,6 +971,17 @@ def infer_landing(row: pd.Series) -> str:
     return "기타"
 
 
+
+def get_monday_based_week_label(dt):
+    if pd.isna(dt):
+        return ""
+    start_of_week = dt - pd.Timedelta(days=dt.weekday())  # Monday
+    first_day_of_month = dt.replace(day=1)
+    first_monday_start = first_day_of_month - pd.Timedelta(days=first_day_of_month.weekday())
+    week_num = ((start_of_week - first_monday_start).days // 7) + 1
+    return f"{dt.month}월 {week_num}주차"
+
+
 def build_total_sales_components(df: pd.DataFrame) -> dict:
     if df.empty:
         return {}
@@ -986,7 +997,7 @@ def build_total_sales_components(df: pd.DataFrame) -> dict:
     base["월"] = base["날짜_dt"].dt.strftime("%Y-%m")
     
 
-base["주차"] = base["날짜_dt"].dt.to_period("W-SUN").apply(
+base["주차"] = base["날짜_dt"].apply(get_monday_based_week_label)
     lambda x: f"{x.start_time.month}월 {((x.start_time.day - 1)//7)+1}주차"
 )
 //7)+1}주차"
