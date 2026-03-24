@@ -995,14 +995,7 @@ def build_total_sales_components(df: pd.DataFrame) -> dict:
         return {}
 
     base["월"] = base["날짜_dt"].dt.strftime("%Y-%m")
-    
-
-base["주차"] = base["날짜_dt"].apply(get_monday_based_week_label)
-    lambda x: f"{x.start_time.month}월 {((x.start_time.day - 1)//7)+1}주차"
-)
-//7)+1}주차"
-)
-
+    base["주차"] = base["날짜_dt"].apply(get_monday_based_week_label)
     base["랜딩"] = base.apply(infer_landing, axis=1)
 
     agg_cols = ["비용", "노출", "클릭", "구매", "매출액"]
