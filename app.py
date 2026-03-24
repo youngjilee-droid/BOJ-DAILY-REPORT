@@ -201,6 +201,40 @@ NUMERIC_COLUMNS = [
     "도달", "참여", "팔로우", "동영상조회",
 ]
 
+REPORT_NUMBER_COLUMNS = [
+    "Spend", "Impression", "Click", "CPC", "CPM", "CPA", "CPA (구매)",
+    "구매 수", "매출", "AOV", "예산", "예상 매출",
+    "비용", "실제 비용", "노출", "클릭", "구매", "매출액",
+    "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
+]
+
+REPORT_PERCENT_COLUMNS = ["CTR", "CVR", "CVR (구매)", "ROAS"]
+
+
+def apply_report_rounding(df: pd.DataFrame) -> pd.DataFrame:
+    rounded_df = df.copy()
+
+    for col in REPORT_NUMBER_COLUMNS:
+        if col in rounded_df.columns:
+            rounded_df[col] = pd.to_numeric(rounded_df[col], errors="coerce").fillna(0).round(0).astype(int)
+
+    for col in REPORT_PERCENT_COLUMNS:
+        if col in rounded_df.columns:
+            rounded_df[col] = pd.to_numeric(rounded_df[col], errors="coerce").fillna(0).round(1)
+
+    return rounded_df
+
+
+def format_report_table_for_display(df: pd.DataFrame) -> pd.DataFrame:
+    display_df = apply_report_rounding(df)
+    for col in REPORT_NUMBER_COLUMNS:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].map(lambda x: f"{x:,}")
+    for col in REPORT_PERCENT_COLUMNS:
+        if col in display_df.columns:
+            display_df[col] = display_df[col].map(lambda x: f"{x:.1f}%")
+    return display_df
+
 
 # =========================================================
 # 3. 매체별 컬럼 매핑
@@ -1027,16 +1061,16 @@ def style_table(ws, start_row: int, start_col: int, df: pd.DataFrame, title: str
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
 
-    for r_idx, row in enumerate(df.itertuples(index=False), start=start_row + 1):
+    rounded_df = apply_report_rounding(df)
+
+    for r_idx, row in enumerate(rounded_df.itertuples(index=False), start=start_row + 1):
         for c_idx, value in enumerate(row, start=start_col):
+            header_name = str(ws.cell(start_row, c_idx).value)
             cell = ws.cell(r_idx, c_idx, value)
             cell.border = Border(top=thin, left=thin, right=thin, bottom=thin)
-            if isinstance(value, float):
-                if any(k in str(ws.cell(start_row, c_idx).value) for k in ["CTR", "CVR", "ROAS"]):
-                    cell.number_format = '0.00'
-                else:
-                    cell.number_format = '#,##0.00'
-            elif isinstance(value, int):
+            if header_name in REPORT_PERCENT_COLUMNS and isinstance(value, (int, float)):
+                cell.number_format = '0.0"%"'
+            elif header_name in REPORT_NUMBER_COLUMNS and isinstance(value, (int, float)):
                 cell.number_format = '#,##0'
 
 
@@ -1096,20 +1130,20 @@ def preview_total_sales_tables(df: pd.DataFrame):
     p1, p2 = st.tabs(["핵심 요약", "상세 테이블"])
     with p1:
         st.markdown("#### Sales Campaign Overview")
-        st.dataframe(sections["sales_campaign_overview"], use_container_width=True)
+        st.dataframe(format_report_table_for_display(sections["sales_campaign_overview"]), use_container_width=True)
         st.markdown("#### Ongoing Campaign Overview")
-        st.dataframe(sections["ongoing_campaign_overview"], use_container_width=True)
+        st.dataframe(format_report_table_for_display(sections["ongoing_campaign_overview"]), use_container_width=True)
         st.markdown("#### 매체 별 MTD")
-        st.dataframe(sections["media_mtd"], use_container_width=True)
+        st.dataframe(format_report_table_for_display(sections["media_mtd"]), use_container_width=True)
         st.markdown("#### 매체 별 성과")
-        st.dataframe(sections["media_performance"], use_container_width=True)
+        st.dataframe(format_report_table_for_display(sections["media_performance"]), use_container_width=True)
     with p2:
         st.markdown("#### 일별 성과")
-        st.dataframe(sections["daily_performance"], use_container_width=True, height=260)
+        st.dataframe(format_report_table_for_display(sections["daily_performance"]), use_container_width=True, height=260)
         st.markdown("#### 주차별 성과")
-        st.dataframe(sections["weekly_performance"], use_container_width=True, height=260)
+        st.dataframe(format_report_table_for_display(sections["weekly_performance"]), use_container_width=True, height=260)
         st.markdown("#### 랜딩별 일별 성과")
-        st.dataframe(sections["landing_daily_performance"], use_container_width=True, height=320)
+        st.dataframe(format_report_table_for_display(sections["landing_daily_performance"]), use_container_width=True, height=320)
 
 
 def build_dashboard_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -1121,26 +1155,7 @@ def build_dashboard_df(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def format_summary_for_display(df: pd.DataFrame) -> pd.DataFrame:
-    display_df = df.copy()
-
-    for col in NUMERIC_COLUMNS:
-        if col in display_df.columns:
-            display_df[col] = pd.to_numeric(display_df[col], errors="coerce").fillna(0)
-
-    metric_float_cols = ["CTR", "CPC", "CPA", "ROAS", "CVR"]
-    for col in metric_float_cols:
-        if col in display_df.columns:
-            display_df[col] = pd.to_numeric(display_df[col], errors="coerce").fillna(0).round(2)
-
-    count_cols = [
-        "비용", "실제 비용", "노출", "클릭", "구매", "매출액",
-        "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
-    ]
-    for col in count_cols:
-        if col in display_df.columns:
-            display_df[col] = pd.to_numeric(display_df[col], errors="coerce").fillna(0)
-
-    return display_df
+    return format_report_table_for_display(df)
 
 
 def combine_all_dataframes(df_list: List[pd.DataFrame]) -> pd.DataFrame:
