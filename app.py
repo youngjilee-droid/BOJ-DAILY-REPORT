@@ -1473,12 +1473,35 @@ def generate_ai_comment(total_df: pd.DataFrame, media_df: pd.DataFrame, campaign
 # =========================================================
 # 8. 룰 기반 코멘트
 # =========================================================
+def coerce_to_number(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        if pd.isna(value):
+            return None
+        return float(value)
+    s = str(value).strip()
+    if s == "" or s.lower() in ["nan", "none", "null"]:
+        return None
+    s = s.replace(",", "").replace("%", "").replace("원", "").replace("건", "")
+    s = re.sub(r"[^0-9.\-]", "", s)
+    if s in ["", ".", "-", "-."]:
+        return None
+    try:
+        return float(s)
+    except Exception:
+        return None
+
+
 def pct_change(curr, prev):
-    if prev in [0, None] or pd.isna(prev):
-        if curr in [0, None] or pd.isna(curr):
+    curr_num = coerce_to_number(curr)
+    prev_num = coerce_to_number(prev)
+
+    if prev_num in [0, None] or pd.isna(prev_num):
+        if curr_num in [0, None] or pd.isna(curr_num):
             return 0
         return None
-    return ((curr - prev) / prev) * 100
+    return ((curr_num - prev_num) / prev_num) * 100
 
 
 def change_word(value, up_word="증가", down_word="감소", flat_word="유사"):
@@ -1492,9 +1515,10 @@ def change_word(value, up_word="증가", down_word="감소", flat_word="유사")
 
 
 def metric_sentence(label, curr, prev, unit="", prefer_rate=True):
+    curr_num = coerce_to_number(curr)
     diff = pct_change(curr, prev)
     word = change_word(diff)
-    curr_text = f"{curr:,.0f}" if pd.notna(curr) else "0"
+    curr_text = f"{curr_num:,.0f}" if curr_num is not None else "0"
 
     if diff is None:
         return f"{label}은(는) {curr_text}{unit}로 집계되었으며 비교 기준 데이터가 부족합니다."
@@ -1513,11 +1537,15 @@ def get_top_media_insight(media_df: pd.DataFrame) -> str:
     if latest.empty:
         return "전일 매체 데이터가 없습니다."
 
-    top_cost_row = latest.sort_values("비용", ascending=False).iloc[0]
+    latest["비용_num"] = latest["비용"].apply(coerce_to_number)
+    prev["ROAS_num"] = prev["ROAS"].apply(coerce_to_number) if "ROAS" in prev.columns else None
+    latest["ROAS_num"] = latest["ROAS"].apply(coerce_to_number) if "ROAS" in latest.columns else None
+
+    top_cost_row = latest.sort_values("비용_num", ascending=False).iloc[0]
     cost_media = top_cost_row["매체"]
     prev_match = prev[prev["매체"] == cost_media]
-    prev_roas = prev_match["ROAS"].iloc[0] if not prev_match.empty else None
-    curr_roas = top_cost_row["ROAS"]
+    prev_roas = prev_match["ROAS_num"].iloc[0] if (not prev_match.empty and "ROAS_num" in prev_match.columns) else None
+    curr_roas = top_cost_row["ROAS_num"]
     roas_diff = pct_change(curr_roas, prev_roas)
     roas_word = change_word(roas_diff, up_word="개선", down_word="하락", flat_word="유사")
 
@@ -1529,13 +1557,15 @@ def get_best_roas_media_insight(media_df: pd.DataFrame) -> str:
         return "매체별 ROAS 비교 데이터가 부족합니다."
 
     latest = media_df[media_df["구분"] == "전일"].copy()
-    latest = latest[latest["비용"] > 0]
+    latest["비용_num"] = latest["비용"].apply(coerce_to_number)
+    latest["ROAS_num"] = latest["ROAS"].apply(coerce_to_number)
+    latest = latest[latest["비용_num"] > 0]
 
     if latest.empty:
         return "ROAS 계산이 가능한 전일 매체 데이터가 없습니다."
 
-    best_row = latest.sort_values("ROAS", ascending=False).iloc[0]
-    return f"전일 기준 ROAS가 가장 높은 매체는 {best_row['매체']}이며, ROAS는 {best_row['ROAS']:.1f}%입니다."
+    best_row = latest.sort_values("ROAS_num", ascending=False).iloc[0]
+    return f"전일 기준 ROAS가 가장 높은 매체는 {best_row['매체']}이며, ROAS는 {best_row['ROAS_num']:.1f}%입니다."
 
 
 def get_campaign_insight(campaign_df: pd.DataFrame) -> str:
@@ -1543,13 +1573,15 @@ def get_campaign_insight(campaign_df: pd.DataFrame) -> str:
         return "캠페인 비교 데이터가 부족합니다."
 
     latest = campaign_df[campaign_df["구분"] == "전일"].copy()
-    latest = latest[latest["비용"] > 0]
+    latest["비용_num"] = latest["비용"].apply(coerce_to_number)
+    latest["매출액_num"] = latest["매출액"].apply(coerce_to_number)
+    latest = latest[latest["비용_num"] > 0]
 
     if latest.empty:
         return "전일 캠페인 데이터가 없습니다."
 
-    top_campaign = latest.sort_values("매출액", ascending=False).iloc[0]
-    return f"전일 매출액 기준 상위 캠페인은 {top_campaign['매체']}의 {top_campaign['캠페인명']}이며, 매출액은 {top_campaign['매출액']:,.0f}입니다."
+    top_campaign = latest.sort_values("매출액_num", ascending=False).iloc[0]
+    return f"전일 매출액 기준 상위 캠페인은 {top_campaign['매체']}의 {top_campaign['캠페인명']}이며, 매출액은 {top_campaign['매출액_num']:,.0f}입니다."
 
 
 def generate_rule_based_comment(total_df: pd.DataFrame, media_df: pd.DataFrame, campaign_df: pd.DataFrame) -> str:
@@ -1565,23 +1597,28 @@ def generate_rule_based_comment(total_df: pd.DataFrame, media_df: pd.DataFrame, 
     latest_row = latest.iloc[0]
 
     if previous.empty:
+        latest_cost = coerce_to_number(latest_row["비용"])
+        latest_sales = coerce_to_number(latest_row["매출액"])
+        latest_roas = coerce_to_number(latest_row["ROAS"])
         return (
             f"전일 데이터는 {latest_row['날짜']} 기준으로 집계되었습니다. "
-            f"총 비용은 {latest_row['비용']:,.0f}, 매출액은 {latest_row['매출액']:,.0f}, "
-            f"ROAS는 {latest_row['ROAS']:.1f}%입니다."
+            f"총 비용은 {latest_cost:,.0f}, 매출액은 {latest_sales:,.0f}, "
+            f"ROAS는 {latest_roas:.1f}%입니다."
         )
 
     prev_row = previous.iloc[0]
     intro_cost = metric_sentence("총 비용", latest_row["비용"], prev_row["비용"], unit="", prefer_rate=True)
     intro_sales = metric_sentence("매출액", latest_row["매출액"], prev_row["매출액"], unit="", prefer_rate=True)
 
+    latest_roas = coerce_to_number(latest_row["ROAS"])
+    latest_purchase = coerce_to_number(latest_row["구매"])
     roas_diff = pct_change(latest_row["ROAS"], prev_row["ROAS"])
     roas_word = change_word(roas_diff, up_word="개선", down_word="하락", flat_word="유사")
-    roas_sentence = f"ROAS는 전전일 대비 {roas_word}되어 {latest_row['ROAS']:.1f}%입니다."
+    roas_sentence = f"ROAS는 전전일 대비 {roas_word}되어 {latest_roas:.1f}%입니다."
 
     purchase_diff = pct_change(latest_row["구매"], prev_row["구매"])
     purchase_word = change_word(purchase_diff)
-    purchase_sentence = f"구매수는 전전일 대비 {purchase_word}하여 {latest_row['구매']:,.0f}건입니다."
+    purchase_sentence = f"구매수는 전전일 대비 {purchase_word}하여 {latest_purchase:,.0f}건입니다."
 
     media_sentence = get_top_media_insight(media_df)
     best_media_sentence = get_best_roas_media_insight(media_df)
