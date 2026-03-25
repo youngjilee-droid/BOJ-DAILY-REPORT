@@ -211,16 +211,27 @@ REPORT_NUMBER_COLUMNS = [
 REPORT_PERCENT_COLUMNS = ["CTR", "CVR", "CVR (구매)", "ROAS"]
 
 
+def sanitize_numeric_series(series: pd.Series) -> pd.Series:
+    cleaned = series.astype(str).str.strip()
+    cleaned = cleaned.replace({"None": "", "nan": "", "NaN": "", "null": "", "NULL": "", "-": ""}, regex=False)
+    cleaned = cleaned.str.replace(",", "", regex=False)
+    cleaned = cleaned.str.replace("원", "", regex=False)
+    cleaned = cleaned.str.replace("건", "", regex=False)
+    cleaned = cleaned.str.replace("%", "", regex=False)
+    cleaned = cleaned.str.replace(r"[^0-9.\-]", "", regex=True)
+    return pd.to_numeric(cleaned, errors="coerce").fillna(0)
+
+
 def apply_report_rounding(df: pd.DataFrame) -> pd.DataFrame:
     rounded_df = df.copy()
 
     for col in REPORT_NUMBER_COLUMNS:
         if col in rounded_df.columns:
-            rounded_df[col] = pd.to_numeric(rounded_df[col], errors="coerce").fillna(0).round(0).astype(int)
+            rounded_df[col] = sanitize_numeric_series(rounded_df[col]).round(0).astype(int)
 
     for col in REPORT_PERCENT_COLUMNS:
         if col in rounded_df.columns:
-            rounded_df[col] = pd.to_numeric(rounded_df[col], errors="coerce").fillna(0).round(1)
+            rounded_df[col] = sanitize_numeric_series(rounded_df[col]).round(1)
 
     return rounded_df
 
@@ -1289,7 +1300,7 @@ def make_summary_row(df: pd.DataFrame, target_date: pd.Timestamp, label: str) ->
         "동영상조회": video_views,
     }])
 
-    return format_summary_for_display(summary)
+    return summary
 
 
 def make_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
@@ -1304,7 +1315,7 @@ def make_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
         return latest_summary
 
     previous_summary = make_summary_row(df, previous_date, "전전일")
-    return format_summary_for_display(pd.concat([latest_summary, previous_summary], ignore_index=True))
+    return pd.concat([latest_summary, previous_summary], ignore_index=True)
 
 
 def make_media_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
@@ -1329,7 +1340,7 @@ def make_media_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
         m["CPA"] = m.apply(lambda x: safe_divide(x["비용"], x["구매"]), axis=1)
         m["CVR"] = m.apply(lambda x: safe_divide(x["구매"], x["클릭"]) * 100, axis=1)
         m["ROAS"] = m.apply(lambda x: safe_divide(x["매출액"], x["비용"]) * 100, axis=1)
-        return format_summary_for_display(m)
+        return m
 
     latest_df = df[df["날짜_dt"].dt.normalize() == latest_date].copy()
     latest_media = _make(latest_df, "전일", latest_date)
@@ -1339,7 +1350,7 @@ def make_media_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
 
     prev_df = df[df["날짜_dt"].dt.normalize() == previous_date].copy()
     prev_media = _make(prev_df, "전전일", previous_date)
-    return format_summary_for_display(pd.concat([latest_media, prev_media], ignore_index=True))[cols_order]
+    return pd.concat([latest_media, prev_media], ignore_index=True)[cols_order]
 
 
 def make_campaign_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
@@ -1365,7 +1376,7 @@ def make_campaign_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
         c["CVR"] = c.apply(lambda x: safe_divide(x["구매"], x["클릭"]) * 100, axis=1)
         c["ROAS"] = c.apply(lambda x: safe_divide(x["매출액"], x["비용"]) * 100, axis=1)
         c = c.sort_values("비용", ascending=False)
-        return format_summary_for_display(c)
+        return c
 
     latest_df = df[df["날짜_dt"].dt.normalize() == latest_date].copy()
     latest_c = _make(latest_df, "전일", latest_date)
@@ -1375,7 +1386,7 @@ def make_campaign_comparison_summary(df: pd.DataFrame) -> pd.DataFrame:
 
     prev_df = df[df["날짜_dt"].dt.normalize() == previous_date].copy()
     prev_c = _make(prev_df, "전전일", previous_date)
-    return format_summary_for_display(pd.concat([latest_c, prev_c], ignore_index=True))[cols_order]
+    return pd.concat([latest_c, prev_c], ignore_index=True)[cols_order]
 
 
 # =========================================================
@@ -2167,31 +2178,35 @@ def render_comment_data_section(df: pd.DataFrame):
 
     t1, t2, t3 = st.tabs(["전체 요약", "매체별 요약", "캠페인별 요약"])
 
+    comparison_display = format_summary_for_display(comparison_summary)
+    media_comparison_display = format_summary_for_display(media_comparison_summary)
+    campaign_comparison_display = format_summary_for_display(campaign_comparison_summary)
+
     with t1:
-        st.dataframe(comparison_summary, use_container_width=True)
+        st.dataframe(comparison_display, use_container_width=True)
         st.download_button(
             "📥 전체 요약 다운로드",
-            to_csv(comparison_summary),
+            to_csv(comparison_display),
             "total_summary.csv",
             mime="text/csv",
             key="comparison_total_summary_download"
         )
 
     with t2:
-        st.dataframe(media_comparison_summary, use_container_width=True)
+        st.dataframe(media_comparison_display, use_container_width=True)
         st.download_button(
             "📥 매체별 요약 다운로드",
-            to_csv(media_comparison_summary),
+            to_csv(media_comparison_display),
             "media_summary.csv",
             mime="text/csv",
             key="comparison_media_summary_download"
         )
 
     with t3:
-        st.dataframe(campaign_comparison_summary, use_container_width=True)
+        st.dataframe(campaign_comparison_display, use_container_width=True)
         st.download_button(
             "📥 캠페인별 요약 다운로드",
-            to_csv(campaign_comparison_summary),
+            to_csv(campaign_comparison_display),
             "campaign_summary.csv",
             mime="text/csv",
             key="comparison_campaign_summary_download"
