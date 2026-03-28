@@ -174,7 +174,7 @@ st.markdown("""
 for key in [
     "meta_auto_df", "naver_auto_df", "kakao_auto_df",
     "tiktok_auto_df", "criteo_auto_df", "buzzvil_auto_df",
-    "final_report_df", "ai_comment", "ai_chat_history"
+    "final_report_df", "direct_final_report_df", "ai_comment", "ai_chat_history"
 ]:
     if key not in st.session_state:
         if key == "ai_chat_history":
@@ -1166,6 +1166,127 @@ def preview_total_sales_tables(df: pd.DataFrame):
         st.dataframe(format_report_table_for_display(sections["weekly_performance"]), use_container_width=True, height=260)
         st.markdown("#### 랜딩별 일별 성과")
         st.dataframe(format_report_table_for_display(sections["landing_daily_performance"]), use_container_width=True, height=320)
+
+
+def standardize_direct_final_report(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [clean_column_name(c) for c in df.columns]
+
+    final_report_column_map = {
+        "날짜": "날짜",
+        "date": "날짜",
+        "day": "날짜",
+        "캠페인명": "캠페인명",
+        "캠페인": "캠페인명",
+        "campaign": "캠페인명",
+        "campaignname": "캠페인명",
+        "광고그룹명": "광고그룹명",
+        "광고그룹": "광고그룹명",
+        "adgroup": "광고그룹명",
+        "adgroupname": "광고그룹명",
+        "광고명": "광고명",
+        "소재명": "광고명",
+        "ad": "광고명",
+        "adname": "광고명",
+        "비용": "비용",
+        "광고비": "비용",
+        "spend": "비용",
+        "실제비용": "실제 비용",
+        "실제 비용": "실제 비용",
+        "actualspend": "실제 비용",
+        "노출": "노출",
+        "impressions": "노출",
+        "클릭": "클릭",
+        "clicks": "클릭",
+        "구매": "구매",
+        "구매수": "구매",
+        "purchases": "구매",
+        "매출액": "매출액",
+        "매출": "매출액",
+        "revenue": "매출액",
+        "sales": "매출액",
+        "장바구니담기수": "장바구니담기수",
+        "장바구니": "장바구니담기수",
+        "도달": "도달",
+        "reach": "도달",
+        "참여": "참여",
+        "engagement": "참여",
+        "팔로우": "팔로우",
+        "follows": "팔로우",
+        "동영상조회": "동영상조회",
+        "videoviews": "동영상조회",
+        "매체": "매체",
+        "매체명": "매체",
+        "media": "매체",
+        "platform": "매체",
+    }
+
+    norm_map = build_normalized_map(final_report_column_map)
+    rename_dict = {}
+    for col in df.columns:
+        norm = normalize_for_matching(col)
+        if norm in norm_map:
+            rename_dict[col] = norm_map[norm]
+    df = df.rename(columns=rename_dict)
+
+    required_min_cols = ["날짜", "비용", "클릭", "구매", "매출액"]
+    missing_required = [c for c in required_min_cols if c not in df.columns]
+    if missing_required:
+        raise ValueError(f"최종 리포트 필수 컬럼이 없습니다: {', '.join(missing_required)}")
+
+    for col in FINAL_COLUMNS:
+        if col not in df.columns:
+            if col in NUMERIC_COLUMNS:
+                df[col] = 0
+            else:
+                df[col] = ""
+
+    df = df[FINAL_COLUMNS]
+    df = convert_numeric_columns(df, NUMERIC_COLUMNS)
+    df = convert_date_column(df)
+    df = add_naver_actual_cost(df)
+    return df
+
+
+
+def read_direct_final_report_file(uploaded_file) -> pd.DataFrame:
+    file_name = uploaded_file.name.lower()
+
+    if file_name.endswith('.csv'):
+        raw_df = load_csv_file(uploaded_file)
+        if raw_df is None:
+            raise ValueError('CSV 파일을 읽지 못했습니다.')
+        return standardize_direct_final_report(raw_df)
+
+    if file_name.endswith('.xlsx') or file_name.endswith('.xls'):
+        uploaded_file.seek(0)
+        excel_file = pd.ExcelFile(uploaded_file)
+        candidate_sheet_names = [
+            'final_report', 'Final_Report', 'FINAL_REPORT',
+            'RAW Data', 'raw data', 'raw_data',
+            '통합리포트', '통합 리포트', 'report'
+        ]
+
+        # 1순위: 자주 쓰는 시트명 우선 탐색
+        for sheet_name in excel_file.sheet_names:
+            if sheet_name in candidate_sheet_names:
+                temp_df = pd.read_excel(excel_file, sheet_name=sheet_name)
+                try:
+                    return standardize_direct_final_report(temp_df)
+                except Exception:
+                    pass
+
+        # 2순위: 전체 시트를 순회하며 필수 컬럼이 있는 첫 시트 사용
+        for sheet_name in excel_file.sheet_names:
+            temp_df = pd.read_excel(excel_file, sheet_name=sheet_name)
+            try:
+                return standardize_direct_final_report(temp_df)
+            except Exception:
+                continue
+
+        raise ValueError('엑셀 내에서 최종 리포트 형식의 시트를 찾지 못했습니다. final_report 또는 RAW Data 시트를 확인해주세요.')
+
+    raise ValueError('지원하지 않는 파일 형식입니다. csv 또는 xlsx 파일을 업로드해주세요.')
 
 
 def build_dashboard_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -2736,6 +2857,38 @@ def render_collection_tab():
             st.warning("통합할 데이터가 없습니다.")
         else:
             st.success("통합 리포트를 생성했습니다.")
+
+    st.markdown("---")
+    st.markdown("### 📘 완성된 최종 리포트 바로 업로드")
+    st.caption("매체별 RAW 취합 과정을 건너뛰고, 이미 완성된 final_report 형식 파일을 바로 불러와 코멘트 생성에 사용할 수 있습니다.")
+
+    direct_report_file = st.file_uploader(
+        "최종 리포트 파일 업로드",
+        type=["csv", "xlsx"],
+        key="direct_final_report_upload"
+    )
+
+    drc1, drc2 = st.columns([1.2, 4])
+    with drc1:
+        apply_direct_report = st.button("📥 최종 리포트 반영", use_container_width=True)
+
+    if direct_report_file is not None:
+        try:
+            direct_df = read_direct_final_report_file(direct_report_file)
+            st.session_state["direct_final_report_df"] = direct_df
+            st.success(f"최종 리포트 미리보기 로드 완료 ({len(direct_df):,}행)")
+            st.dataframe(direct_df.head(20), use_container_width=True)
+        except Exception as e:
+            st.error(f"최종 리포트 파일 처리 중 오류가 발생했습니다: {e}")
+            st.session_state["direct_final_report_df"] = pd.DataFrame()
+
+    if apply_direct_report:
+        direct_df = st.session_state.get("direct_final_report_df", pd.DataFrame())
+        if direct_df.empty:
+            st.warning("먼저 최종 리포트 파일을 업로드해주세요.")
+        else:
+            st.session_state["final_report_df"] = direct_df.copy()
+            st.success("최종 리포트를 현재 앱 데이터로 반영했습니다. 대시보드와 코멘트 탭에서 바로 사용할 수 있습니다.")
 
     st.markdown("---")
     st.markdown("### 📂 수동 업로드")
