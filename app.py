@@ -1458,6 +1458,284 @@ def build_ai_context(total_df: pd.DataFrame, media_df: pd.DataFrame, campaign_df
     return context
 
 
+
+
+# =========================================================
+# 6-A. 회사 톤 자동 코멘트 생성
+# =========================================================
+def format_korean_date_label(date_value) -> str:
+    dt = pd.to_datetime(date_value, errors="coerce")
+    if pd.isna(dt):
+        return str(date_value)
+    weekday_map = ["월", "화", "수", "목", "금", "토", "일"]
+    return f"{dt.month}/{dt.day}({weekday_map[dt.weekday()]})"
+
+
+def format_approx_manwon(value) -> str:
+    num = coerce_to_number(value) or 0
+    return f"약 {round(num / 10000):,}만 원"
+
+
+def format_purchase_count(value) -> str:
+    num = coerce_to_number(value) or 0
+    return f"{round(num):,}건"
+
+
+def format_roas_value(value) -> str:
+    num = coerce_to_number(value) or 0
+    return f"{round(num):,}%"
+
+
+def get_recent_average_dates(df: pd.DataFrame, window: int = 7):
+    valid_dates = df["날짜_dt"].dropna().dt.normalize().drop_duplicates().sort_values()
+    if len(valid_dates) <= 1:
+        return []
+    return list(valid_dates.iloc[:-1].tail(window))
+
+
+def make_average_summary_row(df: pd.DataFrame, target_dates: list, label: str = "지난주 평균") -> pd.DataFrame:
+    if not target_dates:
+        return pd.DataFrame()
+
+    rows = []
+    for target_date in target_dates:
+        row_df = make_summary_row(df, target_date, label)
+        if not row_df.empty:
+            rows.append(row_df)
+
+    if not rows:
+        return pd.DataFrame()
+
+    combined = pd.concat(rows, ignore_index=True)
+    numeric_cols = [
+        "비용", "실제 비용", "노출", "클릭", "CTR", "CPC", "구매", "CPA",
+        "CVR", "매출액", "ROAS", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
+    ]
+    avg_values = {col: combined[col].mean() for col in numeric_cols if col in combined.columns}
+    avg_values["구분"] = label
+    avg_values["날짜"] = f"{target_dates[0].strftime('%Y-%m-%d')}~{target_dates[-1].strftime('%Y-%m-%d')}"
+    return pd.DataFrame([avg_values])
+
+
+def make_recent_avg_summary(df: pd.DataFrame, window: int = 7) -> pd.DataFrame:
+    return make_average_summary_row(df, get_recent_average_dates(df, window=window), label="지난주 평균")
+
+
+def make_media_recent_avg_summary(df: pd.DataFrame, window: int = 7) -> pd.DataFrame:
+    target_dates = get_recent_average_dates(df, window=window)
+    if not target_dates:
+        return pd.DataFrame()
+
+    daily_rows = []
+    for target_date in target_dates:
+        day_df = df[df["날짜_dt"].dt.normalize() == target_date].copy()
+        if day_df.empty:
+            continue
+
+        grouped = day_df.groupby("매체", dropna=False)[
+            ["비용", "실제 비용", "노출", "클릭", "구매", "매출액", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"]
+        ].sum(numeric_only=True).reset_index()
+        grouped["날짜"] = target_date.strftime("%Y-%m-%d")
+        grouped["CTR"] = grouped.apply(lambda x: safe_divide(x["클릭"], x["노출"]) * 100, axis=1)
+        grouped["CPC"] = grouped.apply(lambda x: safe_divide(x["비용"], x["클릭"]), axis=1)
+        grouped["CPA"] = grouped.apply(lambda x: safe_divide(x["비용"], x["구매"]), axis=1)
+        grouped["CVR"] = grouped.apply(lambda x: safe_divide(x["구매"], x["클릭"]) * 100, axis=1)
+        grouped["ROAS"] = grouped.apply(lambda x: safe_divide(x["매출액"], x["비용"]) * 100, axis=1)
+        daily_rows.append(grouped)
+
+    if not daily_rows:
+        return pd.DataFrame()
+
+    combined = pd.concat(daily_rows, ignore_index=True)
+    numeric_cols = [
+        "비용", "실제 비용", "노출", "클릭", "CTR", "CPC", "구매", "CPA",
+        "CVR", "매출액", "ROAS", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
+    ]
+    result = combined.groupby("매체", dropna=False)[numeric_cols].mean(numeric_only=True).reset_index()
+    result["구분"] = "지난주 평균"
+    result["날짜"] = f"{target_dates[0].strftime('%Y-%m-%d')}~{target_dates[-1].strftime('%Y-%m-%d')}"
+    cols = [
+        "구분", "날짜", "매체", "비용", "실제 비용", "노출", "클릭", "CTR", "CPC",
+        "구매", "CPA", "CVR", "매출액", "ROAS", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회"
+    ]
+    return result[cols]
+
+
+def get_top_campaign_name(campaign_df: pd.DataFrame, media_name: str) -> Optional[str]:
+    if campaign_df.empty:
+        return None
+    latest = campaign_df[(campaign_df["구분"] == "전일") & (campaign_df["매체"] == media_name)].copy()
+    if latest.empty:
+        return None
+    latest["매출액_num"] = latest["매출액"].apply(coerce_to_number)
+    latest = latest.sort_values(["매출액_num", "비용"], ascending=False)
+    top_name = latest.iloc[0].get("캠페인명")
+    return str(top_name) if pd.notna(top_name) and str(top_name).strip() else None
+
+
+def build_company_tone_reason(curr_row: pd.Series, prev_row: Optional[pd.Series]) -> str:
+    if prev_row is None:
+        return "비교 기준 데이터가 부족합니다."
+
+    spend_diff = pct_change(curr_row.get("비용"), prev_row.get("비용"))
+    sales_diff = pct_change(curr_row.get("매출액"), prev_row.get("매출액"))
+    roas_diff = pct_change(curr_row.get("ROAS"), prev_row.get("ROAS"))
+    cvr_gap = None
+    if curr_row.get("CVR") is not None and prev_row.get("CVR") is not None:
+        cvr_gap = coerce_to_number(curr_row.get("CVR")) - coerce_to_number(prev_row.get("CVR"))
+    aov_curr = safe_divide(coerce_to_number(curr_row.get("매출액")), coerce_to_number(curr_row.get("구매"))) if coerce_to_number(curr_row.get("구매")) not in [0, None] else None
+    aov_prev = safe_divide(coerce_to_number(prev_row.get("매출액")), coerce_to_number(prev_row.get("구매"))) if coerce_to_number(prev_row.get("구매")) not in [0, None] else None
+    aov_diff = pct_change(aov_curr, aov_prev) if aov_curr is not None and aov_prev is not None else None
+    click_diff = pct_change(curr_row.get("클릭"), prev_row.get("클릭"))
+    purchase_diff = pct_change(curr_row.get("구매"), prev_row.get("구매"))
+
+    if spend_diff is not None and sales_diff is not None and spend_diff >= 20 and sales_diff >= 20 and (roas_diff is None or roas_diff > -10):
+        return "소진 확대에도 매출 동반 상승하며 ROAS 방어"
+    if spend_diff is not None and spend_diff <= -20 and roas_diff is not None and roas_diff >= 10:
+        return "소진 축소에도 구매 효율 유지되며 ROAS 개선"
+
+    parts = []
+    if cvr_gap is not None:
+        if cvr_gap >= 0.3:
+            parts.append("CVR 상승")
+        elif cvr_gap <= -0.3:
+            parts.append("CVR 하락")
+
+    if aov_diff is not None:
+        if aov_diff >= 8:
+            parts.append("AOV 상승")
+        elif aov_diff <= -8:
+            parts.append("AOV 하락")
+
+    if click_diff is not None and not parts:
+        if click_diff >= 20:
+            parts.append("유입 확대")
+        elif click_diff <= -20:
+            parts.append("유입 축소")
+
+    if purchase_diff is not None and len(parts) < 2:
+        if purchase_diff >= 20:
+            parts.append("구매 볼륨 확대")
+        elif purchase_diff <= -20:
+            parts.append("구매 볼륨 축소")
+
+    if spend_diff is not None and len(parts) < 2:
+        if spend_diff >= 20:
+            parts.append("소진 확대")
+        elif spend_diff <= -20:
+            parts.append("소진 축소")
+
+    if not parts:
+        if roas_diff is not None and roas_diff >= 10:
+            parts.append("전반적 효율 개선")
+        elif roas_diff is not None and roas_diff <= -10:
+            parts.append("전반적 효율 저하")
+        else:
+            parts.append("전반적 지표 유사")
+
+    return " 및 ".join(parts[:2])
+
+
+def build_company_tone_level(curr_row: pd.Series, week_row: Optional[pd.Series]) -> str:
+    if week_row is None:
+        return "비교 기준 데이터 부족"
+
+    roas_vs_week = pct_change(curr_row.get("ROAS"), week_row.get("ROAS"))
+    if roas_vs_week is None:
+        return "지난주 평균 비교불가"
+    if roas_vs_week >= 15:
+        return "지난주 평균 대비 ROAS 우수"
+    if roas_vs_week <= -15:
+        return "지난주 평균 대비 ROAS 저조"
+    return "지난주 평균 수준 유지"
+
+
+def build_company_tone_special_line(curr_row: pd.Series, prev_row: Optional[pd.Series], week_row: Optional[pd.Series], media_name: Optional[str] = None) -> str:
+    reason_text = build_company_tone_reason(curr_row, prev_row)
+    level_text = build_company_tone_level(curr_row, week_row)
+
+    if prev_row is None:
+        return f"ㄴ {level_text}"
+
+    roas_diff = pct_change(curr_row.get("ROAS"), prev_row.get("ROAS"))
+    if roas_diff is None:
+        move_text = "직전일 대비 비교불가"
+    elif roas_diff >= 15:
+        move_text = "직전일 대비 효율 개선"
+    elif roas_diff <= -15:
+        move_text = "직전일 대비 효율 하락"
+    else:
+        move_text = "직전일과 유사한 흐름"
+
+    return f"ㄴ {reason_text} 영향으로 {move_text}, {level_text}"
+
+
+def generate_company_tone_comment(
+    df: pd.DataFrame,
+    total_df: pd.DataFrame,
+    media_df: pd.DataFrame,
+    campaign_df: pd.DataFrame,
+    top_n_media: int = 6,
+) -> str:
+    if total_df.empty:
+        return "전일/전전일 비교 데이터가 없어 회사 톤 코멘트를 생성할 수 없습니다."
+
+    latest = total_df[total_df["구분"] == "전일"]
+    previous = total_df[total_df["구분"] == "전전일"]
+    week_avg_total = make_recent_avg_summary(df, window=7)
+    week_avg_media = make_media_recent_avg_summary(df, window=7)
+
+    if latest.empty:
+        return "전일 데이터가 없어 회사 톤 코멘트를 생성할 수 없습니다."
+
+    latest_row = latest.iloc[0]
+    prev_row = previous.iloc[0] if not previous.empty else None
+    week_row = week_avg_total.iloc[0] if not week_avg_total.empty else None
+    date_label = format_korean_date_label(latest_row.get("날짜"))
+
+    lines = []
+    lines.append("# 데일리 Summary")
+    lines.append(
+        f"- {date_label} 광고비 {format_approx_manwon(latest_row.get('비용'))} 소진, "
+        f"구매 건수 {format_purchase_count(latest_row.get('구매'))} 및 매출 {format_approx_manwon(latest_row.get('매출액'))} 확보 "
+        f"(ROAS {format_roas_value(latest_row.get('ROAS'))})"
+    )
+    lines.append(build_company_tone_special_line(latest_row, prev_row, week_row))
+    lines.append("")
+
+    latest_media = media_df[media_df["구분"] == "전일"].copy()
+    prev_media = media_df[media_df["구분"] == "전전일"].copy()
+
+    if not latest_media.empty:
+        latest_media["비용_num"] = latest_media["비용"].apply(coerce_to_number)
+        latest_media = latest_media.sort_values("비용_num", ascending=False).head(top_n_media)
+
+        for idx, (_, row) in enumerate(latest_media.iterrows(), start=1):
+            media_name = row.get("매체", "매체")
+            prev_match = prev_media[prev_media["매체"] == media_name]
+            prev_media_row = prev_match.iloc[0] if not prev_match.empty else None
+
+            week_media_row = None
+            if not week_avg_media.empty:
+                week_match = week_avg_media[week_avg_media["매체"] == media_name]
+                if not week_match.empty:
+                    week_media_row = week_match.iloc[0]
+
+            top_campaign = get_top_campaign_name(campaign_df, media_name)
+
+            lines.append(f"{idx}. {media_name}")
+            lines.append(
+                f"- {date_label} 광고비 {format_approx_manwon(row.get('비용'))} 소진, "
+                f"구매 건수 {format_purchase_count(row.get('구매'))} 및 매출 {format_approx_manwon(row.get('매출액'))} 확보 "
+                f"(ROAS {format_roas_value(row.get('ROAS'))})"
+            )
+            lines.append(build_company_tone_special_line(row, prev_media_row, week_media_row, media_name=media_name))
+            if top_campaign:
+                lines.append(f"ㄴ {top_campaign} 중심으로 성과 확인")
+            lines.append("")
+
+    return "\n".join(lines).strip()
+
 # =========================================================
 # 7. AI 코멘트 생성
 # =========================================================
@@ -2222,6 +2500,19 @@ def render_daily_comment_section(df: pd.DataFrame):
         st.warning("⚠️ AI 코멘트와 챗봇을 위해 비교 데이터가 필요합니다.")
         return
 
+    st.markdown("### 📝 회사 톤 자동 코멘트")
+    st.markdown("전일·전전일·지난주 평균 데이터를 기준으로 기본 코멘트를 자동 생성합니다.")
+    company_tone_comment = generate_company_tone_comment(df, total_summary, media_summary, campaign_summary)
+    st.text_area("회사 톤 코멘트 결과", value=company_tone_comment, height=420)
+    st.download_button(
+        "📥 회사 톤 코멘트 다운로드",
+        data=company_tone_comment.encode("utf-8"),
+        file_name="company_tone_daily_comment.txt",
+        mime="text/plain",
+        key="company_tone_comment_download"
+    )
+
+    st.markdown("---")
     st.markdown("### 🤖 AI 데일리 코멘트")
     st.markdown("OpenAI API로 전일/전전일 비교 데이터를 분석해 코멘트를 생성합니다.")
 
