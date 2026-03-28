@@ -1168,7 +1168,61 @@ def preview_total_sales_tables(df: pd.DataFrame):
         st.dataframe(format_report_table_for_display(sections["landing_daily_performance"]), use_container_width=True, height=320)
 
 
+def _drop_empty_direct_report_artifacts(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [clean_column_name(c) for c in df.columns]
+    df = df.loc[:, [str(c).strip() != "" for c in df.columns]]
+    df = df.loc[:, ~pd.Index(df.columns).astype(str).str.startswith("Unnamed")]
+    df = df.dropna(axis=0, how="all").dropna(axis=1, how="all")
+    return df
+
+
+
+def _coalesce_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if not df.columns.duplicated().any():
+        return df
+
+    result_cols = {}
+    for col in pd.unique(df.columns):
+        same = df.loc[:, df.columns == col]
+        if same.shape[1] == 1:
+            result_cols[col] = same.iloc[:, 0]
+            continue
+
+        if col in NUMERIC_COLUMNS:
+            merged = same.apply(lambda s: sanitize_numeric_series(s), axis=0).sum(axis=1)
+        else:
+            same = same.astype(str).replace({"nan": "", "None": "", "NaT": ""})
+            merged = same.bfill(axis=1).iloc[:, 0].fillna("")
+        result_cols[col] = merged
+
+    return pd.DataFrame(result_cols)
+
+
+
+def _score_direct_report_sheet(df: pd.DataFrame) -> int:
+    if df is None or df.empty:
+        return 0
+
+    expected = {
+        "날짜", "캠페인명", "광고그룹명", "광고명", "비용", "실제 비용", "노출", "클릭",
+        "구매", "매출액", "장바구니담기수", "도달", "참여", "팔로우", "동영상조회", "매체"
+    }
+    aliases = {
+        "date", "day", "campaign", "campaignname", "adgroup", "adgroupname", "adname",
+        "spend", "actualspend", "impressions", "clicks", "purchases", "revenue", "sales",
+        "reach", "engagement", "follows", "videoviews", "media", "platform"
+    }
+    normalized = {normalize_for_matching(c) for c in df.columns}
+    direct_hits = sum(1 for c in df.columns if clean_column_name(c) in expected)
+    alias_hits = sum(1 for c in normalized if c in aliases)
+    required_hits = sum(1 for c in ["날짜", "비용", "클릭", "구매", "매출액"] if c in df.columns)
+    return (direct_hits * 3) + alias_hits + (required_hits * 5)
+
+
+
 def standardize_direct_final_report(df: pd.DataFrame) -> pd.DataFrame:
+    df = _drop_empty_direct_report_artifacts(df)
     df = df.copy()
     df.columns = [clean_column_name(c) for c in df.columns]
 
@@ -1186,6 +1240,7 @@ def standardize_direct_final_report(df: pd.DataFrame) -> pd.DataFrame:
         "adgroupname": "광고그룹명",
         "광고명": "광고명",
         "소재명": "광고명",
+        "광고": "광고명",
         "ad": "광고명",
         "adname": "광고명",
         "비용": "비용",
@@ -1228,6 +1283,7 @@ def standardize_direct_final_report(df: pd.DataFrame) -> pd.DataFrame:
         if norm in norm_map:
             rename_dict[col] = norm_map[norm]
     df = df.rename(columns=rename_dict)
+    df = _coalesce_duplicate_columns(df)
 
     required_min_cols = ["날짜", "비용", "클릭", "구매", "매출액"]
     missing_required = [c for c in required_min_cols if c not in df.columns]
@@ -1241,7 +1297,9 @@ def standardize_direct_final_report(df: pd.DataFrame) -> pd.DataFrame:
             else:
                 df[col] = ""
 
+    df = df.loc[:, ~df.columns.duplicated()]
     df = df[FINAL_COLUMNS]
+    df = df.dropna(how="all")
     df = convert_numeric_columns(df, NUMERIC_COLUMNS)
     df = convert_date_column(df)
     df = add_naver_actual_cost(df)
@@ -1261,30 +1319,37 @@ def read_direct_final_report_file(uploaded_file) -> pd.DataFrame:
     if file_name.endswith('.xlsx') or file_name.endswith('.xls'):
         uploaded_file.seek(0)
         excel_file = pd.ExcelFile(uploaded_file)
-        candidate_sheet_names = [
+        candidate_sheet_names = {
             'final_report', 'Final_Report', 'FINAL_REPORT',
             'RAW Data', 'raw data', 'raw_data',
-            '통합리포트', '통합 리포트', 'report'
-        ]
+            '통합리포트', '통합 리포트', 'report', 'RAW DATA'
+        }
 
-        # 1순위: 자주 쓰는 시트명 우선 탐색
-        for sheet_name in excel_file.sheet_names:
-            if sheet_name in candidate_sheet_names:
-                temp_df = pd.read_excel(excel_file, sheet_name=sheet_name)
-                try:
-                    return standardize_direct_final_report(temp_df)
-                except Exception:
-                    pass
+        best_df = None
+        best_sheet_name = None
+        best_score = -1
 
-        # 2순위: 전체 시트를 순회하며 필수 컬럼이 있는 첫 시트 사용
         for sheet_name in excel_file.sheet_names:
             temp_df = pd.read_excel(excel_file, sheet_name=sheet_name)
-            try:
-                return standardize_direct_final_report(temp_df)
-            except Exception:
-                continue
+            temp_df = _drop_empty_direct_report_artifacts(temp_df)
+            score = _score_direct_report_sheet(temp_df)
+            if clean_column_name(sheet_name) in candidate_sheet_names:
+                score += 20
+            if score > best_score:
+                best_score = score
+                best_df = temp_df
+                best_sheet_name = sheet_name
 
-        raise ValueError('엑셀 내에서 최종 리포트 형식의 시트를 찾지 못했습니다. final_report 또는 RAW Data 시트를 확인해주세요.')
+        if best_df is None or best_score <= 0:
+            raise ValueError('엑셀 내에서 최종 리포트 형식의 시트를 찾지 못했습니다. final_report 또는 RAW Data 시트를 확인해주세요.')
+
+        try:
+            standardized = standardize_direct_final_report(best_df)
+            if standardized.empty:
+                raise ValueError('선택된 시트에 데이터가 없습니다.')
+            return standardized
+        except Exception as e:
+            raise ValueError(f"엑셀 시트 '{best_sheet_name}'을(를) 읽는 중 오류가 발생했습니다: {e}")
 
     raise ValueError('지원하지 않는 파일 형식입니다. csv 또는 xlsx 파일을 업로드해주세요.')
 
