@@ -135,11 +135,66 @@ def transform_advoost(df_raw):
     return df.sort_values("날짜", ascending=False).reset_index(drop=True)
 
 
+def transform_meta(df_raw):
+    """
+    Meta RAW → 표준 리포트 컬럼
+    전환 캠페인 / 참여 캠페인 두 유형 모두 처리 (컬럼 존재 여부로 자동 판별)
+
+    [전환 캠페인 컬럼]
+    - 구매      : 공유 항목이 포함된 구매              (없으면 0)
+    - 매출액    : 공유 항목의 구매 전환값               (없으면 0)
+    - 장바구니  : 공유 항목이 포함된 장바구니에 담기     (없으면 0)
+    - 도달      : 도달                                (없으면 0)
+    - 동영상 조회: 동영상 3초 이상 재생                 (없으면 0)
+
+    [참여 캠페인 추가 컬럼]
+    - 참여      : 게시물 참여          (컬럼 없으면 None)
+    - 팔로우    : Instagram 팔로우    (컬럼 없으면 None)
+
+    [공통]
+    - 날짜      : 일 (이미 YYYY-MM-DD 형식)
+    - 비용      : 지출 금액 (KRW) — VAT 별도 없음
+    - 클릭      : 링크 클릭
+    """
+    cols = df_raw.columns.tolist()
+
+    def _safe(r, key, as_int=True):
+        """컬럼이 존재하면 값 변환, 없으면 None 반환"""
+        if key not in cols:
+            return None
+        val = r.get(key)
+        if val is None or (isinstance(val, float) and pd.isna(val)):
+            return 0 if as_int else None
+        return _to_int(val) if as_int else val
+
+    rows = []
+    for _, r in df_raw.iterrows():
+        rows.append({
+            "날짜":       str(r.get("일", "")).strip(),
+            "캠페인명":   str(r.get("캠페인 이름", "")).strip(),
+            "광고그룹명": str(r.get("광고 세트 이름", "")).strip(),
+            "광고명":     str(r.get("광고 이름", "")).strip(),
+            "비용":       _to_float(r.get("지출 금액 (KRW)", 0)),
+            "노출":       _to_int(r.get("노출", 0)),
+            "클릭":       _to_int(r.get("링크 클릭", 0)),
+            "구매":       _safe(r, "공유 항목이 포함된 구매")         or 0,
+            "매출액":     _safe(r, "공유 항목의 구매 전환값")          or 0,
+            "장바구니":   _safe(r, "공유 항목이 포함된 장바구니에 담기") or 0,
+            "도달":       _safe(r, "도달")                           or 0,
+            "참여":       _safe(r, "게시물 참여"),        # 컬럼 없으면 None
+            "팔로우":     _safe(r, "Instagram 팔로우"),   # 컬럼 없으면 None
+            "동영상 조회": _safe(r, "동영상 3초 이상 재생") or 0,
+        })
+    df = pd.DataFrame(rows, columns=REPORT_COLS)
+    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+    return df.sort_values(["날짜", "캠페인명", "광고그룹명", "광고명"], ascending=True).reset_index(drop=True)
+
+
 # 매체명 → transform 함수 매핑
 # 다른 매체 추가 시 여기에 함수 등록만 하면 됨
 TRANSFORM_MAP = {
     "Naver ADVoost": transform_advoost,
-    # "Meta":   transform_meta,   ← 추후 추가
+    "Meta":          transform_meta,
     # "TikTok": transform_tiktok,
     # "Kakao":  transform_kakao,
 }
@@ -960,6 +1015,27 @@ elif page == "🔄 RAW 리포트 변환":
 | 장바구니 담기수 | 장바구니 | 그대로 |
 | — | 도달·참여·팔로우·동영상 조회 | 빈 칸 |
             """)
+        elif conv_media == "Meta":
+            st.markdown("""
+**전환 캠페인 / 참여 캠페인 모두 지원** — 컬럼 존재 여부를 자동으로 판별합니다.
+
+| RAW 컬럼 | 표준 컬럼 | 처리 방식 | 캠페인 유형 |
+|---|---|---|---|
+| 일 | 날짜 | 이미 `YYYY-MM-DD` 형식 | 공통 |
+| 캠페인 이름 | 캠페인명 | 그대로 | 공통 |
+| 광고 세트 이름 | 광고그룹명 | 그대로 | 공통 |
+| 광고 이름 | 광고명 | 그대로 | 공통 |
+| 지출 금액 (KRW) | 비용 | 그대로 (VAT 별도 없음) | 공통 |
+| 노출 | 노출 | 그대로 | 공통 |
+| 링크 클릭 | 클릭 | 그대로 (NaN → 0) | 공통 |
+| 공유 항목이 포함된 구매 | 구매 | 컬럼 없으면 0 | 전환 |
+| 공유 항목의 구매 전환값 | 매출액 | 컬럼 없으면 0 | 전환 |
+| 공유 항목이 포함된 장바구니에 담기 | 장바구니 | 컬럼 없으면 0 | 전환 |
+| 도달 | 도달 | 컬럼 없으면 0 | 전환 |
+| 동영상 3초 이상 재생 | 동영상 조회 | 컬럼 없으면 0 | 전환 |
+| 게시물 참여 | 참여 | 컬럼 없으면 빈 칸 | 참여 |
+| Instagram 팔로우 | 팔로우 | 컬럼 없으면 빈 칸 | 참여 |
+            """)
 
     conv_file = st.file_uploader(f"📂 {conv_media} RAW 파일 업로드", type=["csv","xlsx"],
                                   key="conv_upload")
@@ -1070,6 +1146,7 @@ elif page == "🔄 RAW 리포트 변환":
         st.markdown("""
 **지원 파일 형식:**
 - Naver ADVoost: 네이버 성과형 디스플레이 광고 → 애셋 그룹 보고서 (csv)
+- Meta: Meta 광고 관리자 → 광고 단위 일별 보고서 (csv)
 
-**추후 추가 예정:** Meta, TikTok, Kakao, Naver SSA/BSA, Criteo, Buzzvil
+**추후 추가 예정:** TikTok, Kakao, Naver SSA/BSA, Criteo, Buzzvil
         """)
