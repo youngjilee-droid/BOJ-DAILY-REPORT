@@ -1292,7 +1292,12 @@ elif page == "🔄 RAW 리포트 변환":
         # ── 다운로드 ──────────────────────────────────────────
         section("▣ 리포트 다운로드")
 
-        def build_integrated_xlsx():
+        # 대시보드에 실제로 표시된 데이터 스냅샷을 그대로 고정
+        export_df_total = df_total.copy().reset_index(drop=True)
+        export_preview_cols = ["날짜", "매체"] + [c for c in REPORT_COLS if c != "날짜"]
+        export_df_total = export_df_total[export_preview_cols]
+
+        def build_integrated_xlsx_from_dashboard(df_export):
             from openpyxl import Workbook as WB2
             from openpyxl.styles import Font as F2, PatternFill as PF2, Alignment as AL2, Border as BD2, Side as SD2
             from openpyxl.utils import get_column_letter as gcl2
@@ -1309,44 +1314,62 @@ elif page == "🔄 RAW 리포트 변환":
             NF = {"비용":"#,##0.00","노출":"#,##0","클릭":"#,##0","구매":"#,##0",
                   "매출액":"#,##0","장바구니":"#,##0","도달":"#,##0",
                   "참여":"#,##0","팔로우":"#,##0","동영상 조회":"#,##0"}
-            CW = {"날짜":13,"캠페인명":22,"광고그룹명":20,"광고명":20,"비용":14,
+            CW = {"날짜":13,"매체":14,"캠페인명":22,"광고그룹명":20,"광고명":20,"비용":14,
                   "노출":12,"클릭":10,"구매":10,"매출액":14,"장바구니":12,
                   "도달":10,"참여":10,"팔로우":10,"동영상 조회":13}
 
-            def write_ws(ws, df_out):
-                for ci, col in enumerate(REPORT_COLS, 1):
+            def write_ws(ws, df_out, columns):
+                for ci, col in enumerate(columns, 1):
                     cell = ws.cell(row=1, column=ci, value=col)
-                    cell.font=HFnt; cell.fill=HF; cell.alignment=C; cell.border=BR
+                    cell.font = HFnt
+                    cell.fill = HF
+                    cell.alignment = C
+                    cell.border = BR
                 for ri, row in df_out.reset_index(drop=True).iterrows():
                     fill = AF if ri % 2 == 1 else None
-                    for ci, col in enumerate(REPORT_COLS, 1):
+                    for ci, col in enumerate(columns, 1):
                         val = row.get(col)
-                        if isinstance(val, float) and pd.isna(val): val = None
-                        cell = ws.cell(row=ri+2, column=ci, value=val)
-                        cell.font=DF; cell.border=BR
-                        if fill: cell.fill=fill
-                        cell.alignment = R if col in NF else (C if col=="날짜" else L)
-                        if col in NF and val is not None: cell.number_format = NF[col]
-                for ci, col in enumerate(REPORT_COLS, 1):
+                        if isinstance(val, float) and pd.isna(val):
+                            val = None
+                        cell = ws.cell(row=ri + 2, column=ci, value=val)
+                        cell.font = DF
+                        cell.border = BR
+                        if fill:
+                            cell.fill = fill
+                        cell.alignment = R if col in NF else (C if col in ["날짜", "매체"] else L)
+                        if col in NF and val is not None:
+                            cell.number_format = NF[col]
+                for ci, col in enumerate(columns, 1):
                     ws.column_dimensions[gcl2(ci)].width = CW.get(col, 12)
                 ws.row_dimensions[1].height = 22
-                for ri in range(2, len(df_out)+2): ws.row_dimensions[ri].height = 18
+                for ri in range(2, len(df_out) + 2):
+                    ws.row_dimensions[ri].height = 18
                 ws.freeze_panes = "A2"
 
-            wb = WB2(); wb.remove(wb.active)
-            # 매체별 시트
-            for m, df_m in st.session_state.converted_reports.items():
-                write_ws(wb.create_sheet(title=m[:31]), df_m)
-            # Total_Raw 시트
-            write_ws(wb.create_sheet(title="Total_Raw"), df_total[REPORT_COLS])
-            buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+            wb = WB2()
+            wb.remove(wb.active)
+
+            # 1) 대시보드 미리보기와 동일한 전체 데이터 시트
+            write_ws(wb.create_sheet(title="통합데이터"), df_export, export_preview_cols)
+
+            # 2) 매체별 시트도 동일 스냅샷에서 분기
+            for media in df_export["매체"].dropna().astype(str).unique().tolist():
+                df_media_export = df_export[df_export["매체"] == media].copy()
+                write_ws(wb.create_sheet(title=media[:31]), df_media_export.drop(columns=["매체"]), REPORT_COLS)
+
+            # 3) Total_Raw도 같은 스냅샷 기준으로 생성
+            write_ws(wb.create_sheet(title="Total_Raw"), df_export, export_preview_cols)
+
+            buf = io.BytesIO()
+            wb.save(buf)
+            buf.seek(0)
             return buf
 
         dl1, dl2 = st.columns(2)
         with dl1:
             st.download_button(
-                label="⬇️ 통합 리포트 xlsx (매체별 시트 + Total_Raw)",
-                data=build_integrated_xlsx(),
+                label="⬇️ 통합 리포트 xlsx (대시보드 표시값 그대로 저장)",
+                data=build_integrated_xlsx_from_dashboard(export_df_total),
                 file_name=f"통합리포트_{datetime.today().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary", use_container_width=True,
@@ -1354,7 +1377,7 @@ elif page == "🔄 RAW 리포트 변환":
         with dl2:
             st.download_button(
                 label="⬇️ Total_Raw만 xlsx",
-                data=build_xlsx(df_total[REPORT_COLS], sheet_title="Total_Raw"),
+                data=build_xlsx(export_df_total.drop(columns=["매체"]), sheet_title="Total_Raw"),
                 file_name=f"Total_Raw_{datetime.today().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
