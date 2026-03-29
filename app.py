@@ -123,26 +123,33 @@ def transform_advoost(df_raw):
     - 장바구니: 장바구니 담기수
     - 도달~동영상 조회: None (ADVoost 미제공)
     """
+    # 컬럼명 공백·특수문자 정규화 후 딕셔너리로 접근 (r.get 오작동 방지)
+    df_raw = df_raw.copy()
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+
+    # 컬럼 존재 여부 확인용 헬퍼
+    def _col(row, name, default=None):
+        return row[name] if name in row.index else default
+
     rows = []
     for _, r in df_raw.iterrows():
         rows.append({
-            "날짜":       _parse_advoost_date(r.get("기간")),   # 기간 = 날짜
-            "캠페인명":   str(r.get("캠페인 이름", "")).strip(),
-            "광고그룹명": str(r.get("애셋 그룹 이름", "")).strip(),
+            "날짜":       _parse_advoost_date(_col(r, "기간")),        # 기간 = 날짜
+            "캠페인명":   str(_col(r, "캠페인 이름", "")).strip(),
+            "광고그룹명": str(_col(r, "애셋 그룹 이름", "")).strip(),
             "광고명":     "Asset_all_items",
-            "비용":       _to_float(r.get("총 비용", 0)) / 1.1,
-            "노출":       _to_int(r.get("노출", 0)),
-            "클릭":       _to_int(r.get("클릭", 0)),
-            "구매":       _to_int(r.get("구매완료수", 0)),
-            "매출액":     _to_int(r.get("구매완료 전환 매출액", 0)),
-            "장바구니":   _to_int(r.get("장바구니 담기수", 0)),
+            "비용":       _to_float(_col(r, "총 비용", 0)) / 1.1,
+            "노출":       _to_int(_col(r, "노출", 0)),
+            "클릭":       _to_int(_col(r, "클릭", 0)),
+            "구매":       _to_int(_col(r, "구매완료수", 0)),
+            "매출액":     _to_int(_col(r, "구매완료 전환 매출액", 0)),
+            "장바구니":   _to_int(_col(r, "장바구니 담기수", 0)),
             "도달":       None,
             "참여":       None,
             "팔로우":     None,
             "동영상 조회": None,
         })
     df = pd.DataFrame(rows, columns=REPORT_COLS)
-    # 날짜가 이미 Timestamp이므로 astype만 보장
     df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
     return df.sort_values("날짜", ascending=False).reset_index(drop=True)
 
@@ -168,31 +175,38 @@ def transform_meta(df_raw):
     - 비용      : 지출 금액 (KRW) — VAT 별도 없음
     - 클릭      : 링크 클릭
     """
+    # 컬럼명 공백·특수문자 정규화
+    df_raw = df_raw.copy()
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
     cols = df_raw.columns.tolist()
 
     def _safe(r, key, as_int=True):
         """컬럼이 존재하면 값 변환, 없으면 None 반환"""
-        if key not in cols:
+        if key not in r.index:
             return None
-        val = r.get(key)
+        val = r[key]
         if val is None or (isinstance(val, float) and pd.isna(val)):
             return 0 if as_int else None
         return _to_int(val) if as_int else val
 
+    def _col(r, key, default=""):
+        """컬럼 값 안전하게 읽기"""
+        return r[key] if key in r.index else default
+
     rows = []
     for _, r in df_raw.iterrows():
         rows.append({
-            "날짜":       str(r.get("일", "")).strip(),
-            "캠페인명":   str(r.get("캠페인 이름", "")).strip(),
-            "광고그룹명": str(r.get("광고 세트 이름", "")).strip(),
-            "광고명":     str(r.get("광고 이름", "")).strip(),
-            "비용":       _to_float(r.get("지출 금액 (KRW)", 0)),
-            "노출":       _to_int(r.get("노출", 0)),
-            "클릭":       _to_int(r.get("링크 클릭", 0)),
-            "구매":       _safe(r, "공유 항목이 포함된 구매")         or 0,
-            "매출액":     _safe(r, "공유 항목의 구매 전환값")          or 0,
+            "날짜":       str(_col(r, "일")).strip(),
+            "캠페인명":   str(_col(r, "캠페인 이름")).strip(),
+            "광고그룹명": str(_col(r, "광고 세트 이름")).strip(),
+            "광고명":     str(_col(r, "광고 이름")).strip(),
+            "비용":       _to_float(_col(r, "지출 금액 (KRW)", 0)),
+            "노출":       _to_int(_col(r, "노출", 0)),
+            "클릭":       _to_int(_col(r, "링크 클릭", 0)),
+            "구매":       _safe(r, "공유 항목이 포함된 구매")          or 0,
+            "매출액":     _safe(r, "공유 항목의 구매 전환값")           or 0,
             "장바구니":   _safe(r, "공유 항목이 포함된 장바구니에 담기") or 0,
-            "도달":       _safe(r, "도달")                           or 0,
+            "도달":       _safe(r, "도달")                            or 0,
             "참여":       _safe(r, "게시물 참여"),        # 컬럼 없으면 None
             "팔로우":     _safe(r, "Instagram 팔로우"),   # 컬럼 없으면 None
             "동영상 조회": _safe(r, "동영상 3초 이상 재생") or 0,
