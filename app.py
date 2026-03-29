@@ -476,6 +476,26 @@ def build_topline(label, target_dt, today, prev_day, pw, monthly, weekly, rtype)
                 f"매출 {fmt_won(monthly['revenue'])} 확보 (ROAS {fmt_roas(monthly['spend'], monthly['revenue'])})\n")
     return out
 
+
+def _get_few_shot_examples(label, n=5):
+    """히스토리에서 동일 매체 최근 코멘트 n개를 few-shot 예시로 반환"""
+    history = st.session_state.get("comment_history", [])
+    if not history:
+        return ""
+    same   = [h for h in history if h.get("media","") == label]
+    others = [h for h in history if h.get("media","") != label]
+    candidates = (same or others)[-n:]
+    if not candidates:
+        return ""
+    lines = ["[과거 코멘트 예시 — 이 형식과 어투를 그대로 따르세요]"]
+    for i, h in enumerate(candidates, 1):
+        landing = h.get("landing","")
+        meta = f"{h.get('date','')} / {h.get('media','')}" + (f"/{landing}" if landing else "")
+        lines.append(f"\n--- 예시 {i} ({meta}) ---")
+        lines.append(h.get("comment","").strip())
+    return "\n".join(lines)
+
+
 def gen_ai_insight(api_key, today, prev_day, pw, label, target_dt, note=""):
     if not OPENAI_AVAILABLE: return "(openai 패키지 미설치)"
     try:
@@ -483,21 +503,38 @@ def gen_ai_insight(api_key, today, prev_day, pw, label, target_dt, note=""):
         roas_t = today["revenue"]/today["spend"]*100 if today["spend"] else 0
         roas_p = prev_day["revenue"]/prev_day["spend"]*100 if prev_day and prev_day["spend"] else 0
         roas_w = pw["roas"] if pw else 0
-        prompt = f"""당신은 디지털 광고 성과 분석 전문가입니다.
-아래 데이터로 {label}의 {target_dt.strftime('%m/%d')} 성과 특이사항을 한국어로 작성하세요.
 
+        few_shot = _get_few_shot_examples(label, n=5)
+
+        system_msg = """당신은 BOJ(뷰티오브조선) 디지털 광고 성과 분석 전문가입니다.
+과거 코멘트 예시가 제공되면 그 형식·어투·표현 방식을 정확히 따라서 작성하세요.
+예시가 없으면 아래 규칙을 따르세요:
+- 2~4줄 bullet(ㄴ 또는 - 시작)
+- 유의미한 변화만 언급 (ROAS 5%p 이상 변화)
+- "약 X만 원" / "X%p 상승/하락" 형식
+- 인사말·서론 없이 bullet로 바로 시작"""
+
+        user_msg = f"""{few_shot}
+
+[분석 대상: {label} / {target_dt.strftime('%m/%d')}]
 [오늘] 광고비:{today['spend']:,.0f}원 / 구매:{today['purchase']:.0f}건 / 매출:{today['revenue']:,.0f}원 / ROAS:{roas_t:.0f}%
 [전일] 광고비:{prev_day['spend']:,.0f}원 / ROAS:{roas_p:.0f}% / 구매:{prev_day['purchase']:.0f}건
 [전주평균] 광고비:{pw['spend']:,.0f}원 / ROAS:{roas_w:.0f}% / 구매:{pw['purchase']:.0f}건
 {f'[메모] {note}' if note else ''}
 
-규칙: 2~4줄 bullet(ㄴ/-), 유의미한 변화만, ROAS 효율 원인 추정, "약 X만 원"/"X%p 상승/하락" 형식, 인사말 없이 바로 시작."""
+위 데이터로 특이사항 코멘트를 작성하세요."""
+
         resp = client.chat.completions.create(
-            model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}],
-            max_tokens=400, temperature=0.3)
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user",   "content": user_msg},
+            ],
+            max_tokens=500, temperature=0.3)
         return resp.choices[0].message.content.strip()
     except Exception as e:
         return f"(AI 오류: {str(e)[:80]})"
+
 
 def render_media_comment(mk, df_m, target_dt, prev_day_dt, month_start, week_start,
                           rtype, api_key, note, all_comments):
@@ -683,7 +720,9 @@ def make_agg_table(df, group_cols):
 # ══════════════════════════════════════════════════════════════
 with st.sidebar:
     st.title("📊 BOJ 광고 대시보드")
-    page = st.radio("페이지", ["📝 코멘트 생성기", "📈 리포트 대시보드", "🔄 RAW 리포트 변환"],
+    page = st.radio("페이지",
+                    ["📝 코멘트 생성기", "📈 리포트 대시보드",
+                     "🔄 RAW 리포트 변환", "🧠 코멘트 히스토리"],
                     label_visibility="collapsed")
     st.divider()
 
@@ -1292,12 +1331,7 @@ elif page == "🔄 RAW 리포트 변환":
         # ── 다운로드 ──────────────────────────────────────────
         section("▣ 리포트 다운로드")
 
-        # 대시보드에 실제로 표시된 데이터 스냅샷을 그대로 고정
-        export_df_total = df_total.copy().reset_index(drop=True)
-        export_preview_cols = ["날짜", "매체"] + [c for c in REPORT_COLS if c != "날짜"]
-        export_df_total = export_df_total[export_preview_cols]
-
-        def build_integrated_xlsx_from_dashboard(df_export):
+        def build_integrated_xlsx():
             from openpyxl import Workbook as WB2
             from openpyxl.styles import Font as F2, PatternFill as PF2, Alignment as AL2, Border as BD2, Side as SD2
             from openpyxl.utils import get_column_letter as gcl2
@@ -1314,62 +1348,44 @@ elif page == "🔄 RAW 리포트 변환":
             NF = {"비용":"#,##0.00","노출":"#,##0","클릭":"#,##0","구매":"#,##0",
                   "매출액":"#,##0","장바구니":"#,##0","도달":"#,##0",
                   "참여":"#,##0","팔로우":"#,##0","동영상 조회":"#,##0"}
-            CW = {"날짜":13,"매체":14,"캠페인명":22,"광고그룹명":20,"광고명":20,"비용":14,
+            CW = {"날짜":13,"캠페인명":22,"광고그룹명":20,"광고명":20,"비용":14,
                   "노출":12,"클릭":10,"구매":10,"매출액":14,"장바구니":12,
                   "도달":10,"참여":10,"팔로우":10,"동영상 조회":13}
 
-            def write_ws(ws, df_out, columns):
-                for ci, col in enumerate(columns, 1):
+            def write_ws(ws, df_out):
+                for ci, col in enumerate(REPORT_COLS, 1):
                     cell = ws.cell(row=1, column=ci, value=col)
-                    cell.font = HFnt
-                    cell.fill = HF
-                    cell.alignment = C
-                    cell.border = BR
+                    cell.font=HFnt; cell.fill=HF; cell.alignment=C; cell.border=BR
                 for ri, row in df_out.reset_index(drop=True).iterrows():
                     fill = AF if ri % 2 == 1 else None
-                    for ci, col in enumerate(columns, 1):
+                    for ci, col in enumerate(REPORT_COLS, 1):
                         val = row.get(col)
-                        if isinstance(val, float) and pd.isna(val):
-                            val = None
-                        cell = ws.cell(row=ri + 2, column=ci, value=val)
-                        cell.font = DF
-                        cell.border = BR
-                        if fill:
-                            cell.fill = fill
-                        cell.alignment = R if col in NF else (C if col in ["날짜", "매체"] else L)
-                        if col in NF and val is not None:
-                            cell.number_format = NF[col]
-                for ci, col in enumerate(columns, 1):
+                        if isinstance(val, float) and pd.isna(val): val = None
+                        cell = ws.cell(row=ri+2, column=ci, value=val)
+                        cell.font=DF; cell.border=BR
+                        if fill: cell.fill=fill
+                        cell.alignment = R if col in NF else (C if col=="날짜" else L)
+                        if col in NF and val is not None: cell.number_format = NF[col]
+                for ci, col in enumerate(REPORT_COLS, 1):
                     ws.column_dimensions[gcl2(ci)].width = CW.get(col, 12)
                 ws.row_dimensions[1].height = 22
-                for ri in range(2, len(df_out) + 2):
-                    ws.row_dimensions[ri].height = 18
+                for ri in range(2, len(df_out)+2): ws.row_dimensions[ri].height = 18
                 ws.freeze_panes = "A2"
 
-            wb = WB2()
-            wb.remove(wb.active)
-
-            # 1) 대시보드 미리보기와 동일한 전체 데이터 시트
-            write_ws(wb.create_sheet(title="통합데이터"), df_export, export_preview_cols)
-
-            # 2) 매체별 시트도 동일 스냅샷에서 분기
-            for media in df_export["매체"].dropna().astype(str).unique().tolist():
-                df_media_export = df_export[df_export["매체"] == media].copy()
-                write_ws(wb.create_sheet(title=media[:31]), df_media_export.drop(columns=["매체"]), REPORT_COLS)
-
-            # 3) Total_Raw도 같은 스냅샷 기준으로 생성
-            write_ws(wb.create_sheet(title="Total_Raw"), df_export, export_preview_cols)
-
-            buf = io.BytesIO()
-            wb.save(buf)
-            buf.seek(0)
+            wb = WB2(); wb.remove(wb.active)
+            # 매체별 시트
+            for m, df_m in st.session_state.converted_reports.items():
+                write_ws(wb.create_sheet(title=m[:31]), df_m)
+            # Total_Raw 시트
+            write_ws(wb.create_sheet(title="Total_Raw"), df_total[REPORT_COLS])
+            buf = io.BytesIO(); wb.save(buf); buf.seek(0)
             return buf
 
         dl1, dl2 = st.columns(2)
         with dl1:
             st.download_button(
-                label="⬇️ 통합 리포트 xlsx (대시보드 표시값 그대로 저장)",
-                data=build_integrated_xlsx_from_dashboard(export_df_total),
+                label="⬇️ 통합 리포트 xlsx (매체별 시트 + Total_Raw)",
+                data=build_integrated_xlsx(),
                 file_name=f"통합리포트_{datetime.today().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary", use_container_width=True,
@@ -1377,7 +1393,7 @@ elif page == "🔄 RAW 리포트 변환":
         with dl2:
             st.download_button(
                 label="⬇️ Total_Raw만 xlsx",
-                data=build_xlsx(export_df_total.drop(columns=["매체"]), sheet_title="Total_Raw"),
+                data=build_xlsx(df_total[REPORT_COLS], sheet_title="Total_Raw"),
                 file_name=f"Total_Raw_{datetime.today().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
@@ -1394,3 +1410,296 @@ elif page == "🔄 RAW 리포트 변환":
 
 **추후 추가 예정:** TikTok, Kakao, Naver SSA/BSA, Criteo, Buzzvil
         """)
+
+
+# ══════════════════════════════════════════════════════════════
+# PAGE 4 — 코멘트 히스토리
+# ══════════════════════════════════════════════════════════════
+elif page == "🧠 코멘트 히스토리":
+    import json, re
+
+    st.title("🧠 코멘트 히스토리")
+    st.caption("과거 코멘트를 저장해두면 AI가 동일한 형식·어투로 코멘트를 생성합니다.")
+
+    # ── 사이드바: 현황 ────────────────────────────────────────
+    with st.sidebar:
+        st.subheader("📊 히스토리 현황")
+        history = st.session_state.comment_history
+        if history:
+            df_h = pd.DataFrame(history)
+            st.metric("총 저장 건수", f"{len(history)}건")
+            if "media" in df_h.columns:
+                for m, cnt in df_h["media"].value_counts().items():
+                    st.caption(f"  {m}: {cnt}건")
+        else:
+            st.caption("저장된 히스토리 없음")
+        st.divider()
+        if st.button("🗑️ 히스토리 전체 삭제", use_container_width=True, key="hist_reset"):
+            st.session_state.comment_history = []
+            st.rerun()
+
+    # ── 탭 구성 ──────────────────────────────────────────────
+    tab_upload, tab_manual, tab_view = st.tabs(
+        ["📂 파일 업로드 (txt/csv)", "✏️ 직접 입력·저장", "📋 저장된 히스토리 보기"]
+    )
+
+    # ════════════════════════════════════════════════════════
+    # TAB 1 — 파일 업로드
+    # ════════════════════════════════════════════════════════
+    with tab_upload:
+        st.subheader("파일로 히스토리 업로드")
+
+        with st.expander("📌 파일 형식 안내", expanded=True):
+            st.markdown("""
+**지원 형식 1: txt 파일** — 카카오톡·슬랙에서 복사한 텍스트 그대로 붙여넣고 저장  
+날짜/매체 구분자가 없어도 됩니다. 아래처럼 블록 단위로 구성하면 자동 파싱됩니다.
+
+```
+[2026-03-01 / Meta / 올리브영]
+* Meta — 올리브영
+- 3/1(일) 광고비 약 237만 원 소진, 구매 건수 284건 ...
+ㄴ 전주 대비 CVR 급증 ...
+
+[2026-03-02 / Meta / 네이버 브랜드스토어]
+* Meta — 네이버 브랜드스토어
+- 3/2(월) 광고비 약 150만 원 소진 ...
+```
+
+**지원 형식 2: csv 파일** — 헤더: `date, media, landing, comment`
+```
+date,media,landing,comment
+2026-03-01,Meta,올리브영,"* Meta...\\nㄴ ..."
+2026-03-02,Naver BSA,네이버 브랜드스토어,"* Naver BSA..."
+```
+
+**형식 3: 구분자 없는 txt** — 날짜·매체를 직접 지정하고 전체 텍스트를 일괄 저장
+            """)
+
+        uploaded_hist = st.file_uploader(
+            "히스토리 파일 업로드", type=["txt","csv"], key="hist_upload"
+        )
+
+        # 날짜·매체 수동 지정 (txt 구분자 없을 때)
+        col_m1, col_m2, col_m3 = st.columns(3)
+        with col_m1:
+            manual_date = st.text_input("날짜 (YYYY-MM-DD)", placeholder="2026-03-01", key="hist_date")
+        with col_m2:
+            manual_media = st.selectbox("매체", [""] + list(COMMENT_MEDIA_MAP.keys()), key="hist_media")
+        with col_m3:
+            manual_landing = st.text_input("랜딩 (선택)", placeholder="올리브영", key="hist_landing")
+
+        if uploaded_hist and st.button("📥 파일 파싱 & 저장", type="primary", use_container_width=True, key="hist_parse"):
+            try:
+                raw_text = uploaded_hist.read().decode("utf-8-sig").strip()
+                added = []
+
+                if uploaded_hist.name.endswith(".csv"):
+                    # ── CSV 파싱 ──────────────────────────────
+                    import csv, io as _io
+                    reader = csv.DictReader(_io.StringIO(raw_text))
+                    for row in reader:
+                        entry = {
+                            "date":    row.get("date","").strip(),
+                            "media":   row.get("media","").strip(),
+                            "landing": row.get("landing","").strip(),
+                            "comment": row.get("comment","").strip(),
+                        }
+                        if entry["comment"]:
+                            added.append(entry)
+
+                else:
+                    # ── TXT 파싱 ─────────────────────────────
+                    # 패턴: [YYYY-MM-DD / 매체 / 랜딩] 으로 블록 분리
+                    block_pattern = re.compile(
+                        r'\[(\d{4}-\d{2}-\d{2})\s*/\s*([^/\]]+?)(?:\s*/\s*([^\]]*?))?\]',
+                        re.MULTILINE
+                    )
+                    matches = list(block_pattern.finditer(raw_text))
+
+                    if matches:
+                        # 구분자 있는 txt
+                        for i, m in enumerate(matches):
+                            block_start = m.end()
+                            block_end   = matches[i+1].start() if i+1 < len(matches) else len(raw_text)
+                            comment_text = raw_text[block_start:block_end].strip()
+                            if comment_text:
+                                added.append({
+                                    "date":    m.group(1).strip(),
+                                    "media":   m.group(2).strip(),
+                                    "landing": (m.group(3) or "").strip(),
+                                    "comment": comment_text,
+                                })
+                    else:
+                        # 구분자 없는 txt — 수동 지정값 사용, 전체를 하나의 코멘트로
+                        if not manual_date or not manual_media:
+                            st.warning("구분자가 없는 txt 파일입니다. 위에서 날짜와 매체를 지정하세요.")
+                        else:
+                            added.append({
+                                "date":    manual_date.strip(),
+                                "media":   manual_media.strip(),
+                                "landing": manual_landing.strip(),
+                                "comment": raw_text,
+                            })
+
+                if added:
+                    # 중복 제거 후 추가
+                    existing_keys = {
+                        (h["date"], h["media"], h["landing"], h["comment"][:50])
+                        for h in st.session_state.comment_history
+                    }
+                    new_entries = [
+                        e for e in added
+                        if (e["date"], e["media"], e["landing"], e["comment"][:50])
+                        not in existing_keys
+                    ]
+                    st.session_state.comment_history.extend(new_entries)
+                    st.session_state.comment_history.sort(key=lambda x: x.get("date",""))
+                    st.success(f"✅ {len(new_entries)}건 저장 완료 (중복 {len(added)-len(new_entries)}건 제외)")
+                    if new_entries:
+                        st.dataframe(
+                            pd.DataFrame(new_entries)[["date","media","landing","comment"]],
+                            use_container_width=True, height=200, hide_index=True
+                        )
+                else:
+                    st.warning("저장할 코멘트를 찾지 못했습니다. 파일 형식을 확인하세요.")
+
+            except Exception as e:
+                st.error(f"파싱 오류: {e}")
+                import traceback; st.code(traceback.format_exc())
+
+        # 템플릿 다운로드
+        st.divider()
+        st.caption("📎 아래 템플릿을 받아서 작성 후 업로드하세요.")
+        template_txt = """[2026-03-01 / Meta / 올리브영]
+* Meta — 올리브영
+- 3/1(일) 광고비 약 237만 원 소진, 구매 건수 284건 및 매출 약 539만 원 확보 (ROAS 226%)
+ㄴ 전주 대비 세트 공통적으로 CVR 급증, 기존 고효율 소재 위주 구매 획득
+ㄴ 특히, 전주 효율 저조했던 잠재고객 세트의 경우 ROAS 2배 이상 개선
+
+[2026-03-02 / Naver BSA / 네이버 브랜드스토어]
+* Naver BSA
+- 3/2(월) 광고비 약 150만 원 소진, 구매 건수 173건 및 매출 약 856만 원 확보 (ROAS 570%)
+ㄴ 전주와 CVR 동수준 유지, AOV 1.3만원 높게 형성되며 매출 상승
+"""
+        col_t1, col_t2 = st.columns(2)
+        with col_t1:
+            st.download_button(
+                "⬇️ txt 템플릿 다운로드",
+                data=template_txt.encode("utf-8-sig"),
+                file_name="comment_history_template.txt",
+                mime="text/plain", use_container_width=True,
+            )
+        with col_t2:
+            template_csv = "date,media,landing,comment\n2026-03-01,Meta,올리브영,\"* Meta\\nㄴ 예시 코멘트\"\n"
+            st.download_button(
+                "⬇️ csv 템플릿 다운로드",
+                data=template_csv.encode("utf-8-sig"),
+                file_name="comment_history_template.csv",
+                mime="text/csv", use_container_width=True,
+            )
+
+    # ════════════════════════════════════════════════════════
+    # TAB 2 — 직접 입력·저장
+    # ════════════════════════════════════════════════════════
+    with tab_manual:
+        st.subheader("코멘트 직접 입력")
+        st.caption("코멘트를 복사해서 붙여넣고, 날짜·매체 정보를 입력한 뒤 저장하세요.")
+
+        mc1, mc2, mc3 = st.columns(3)
+        with mc1:
+            m_date    = st.text_input("날짜 (YYYY-MM-DD)", placeholder="2026-03-01", key="manual_date")
+        with mc2:
+            m_media   = st.selectbox("매체", [""] + list(COMMENT_MEDIA_MAP.keys()), key="manual_media_sel")
+        with mc3:
+            m_landing = st.text_input("랜딩 (선택)", placeholder="올리브영", key="manual_landing")
+
+        m_comment = st.text_area(
+            "코멘트 내용 붙여넣기",
+            height=200,
+            placeholder="* Meta — 올리브영\n- 3/1(일) 광고비 약 237만 원 소진...\nㄴ 전주 대비 CVR 급증...",
+            key="manual_comment",
+        )
+
+        if st.button("💾 저장", type="primary", use_container_width=True, key="manual_save"):
+            if not m_date or not m_media or not m_comment.strip():
+                st.warning("날짜, 매체, 코멘트 내용을 모두 입력하세요.")
+            else:
+                entry = {
+                    "date":    m_date.strip(),
+                    "media":   m_media.strip(),
+                    "landing": m_landing.strip(),
+                    "comment": m_comment.strip(),
+                }
+                st.session_state.comment_history.append(entry)
+                st.session_state.comment_history.sort(key=lambda x: x.get("date",""))
+                st.success(f"✅ 저장 완료 — {m_date} / {m_media}")
+                st.rerun()
+
+    # ════════════════════════════════════════════════════════
+    # TAB 3 — 저장된 히스토리 보기 & 관리
+    # ════════════════════════════════════════════════════════
+    with tab_view:
+        st.subheader("저장된 코멘트 히스토리")
+        history = st.session_state.comment_history
+
+        if not history:
+            st.info("저장된 히스토리가 없습니다. '파일 업로드' 또는 '직접 입력' 탭에서 저장하세요.")
+        else:
+            # 필터
+            fc1, fc2 = st.columns(2)
+            with fc1:
+                all_media_opts = ["전체"] + sorted(set(h.get("media","") for h in history if h.get("media")))
+                filter_media   = st.selectbox("매체 필터", all_media_opts, key="hist_filter_media")
+            with fc2:
+                filter_kw = st.text_input("코멘트 키워드 검색", placeholder="CVR, ROAS, 소재명 등", key="hist_kw")
+
+            filtered = [
+                h for h in history
+                if (filter_media == "전체" or h.get("media","") == filter_media)
+                and (not filter_kw or filter_kw.lower() in h.get("comment","").lower())
+            ]
+
+            st.caption(f"전체 {len(history)}건 중 {len(filtered)}건 표시")
+
+            # 목록 표시
+            for i, h in enumerate(reversed(filtered)):  # 최신순
+                with st.expander(
+                    f"📅 {h.get('date','-')} | {h.get('media','-')}"
+                    + (f" / {h['landing']}" if h.get('landing') else ""),
+                    expanded=False,
+                ):
+                    st.text(h.get("comment",""))
+                    if st.button("🗑️ 이 항목 삭제", key=f"del_{i}_{h.get('date')}"):
+                        orig_idx = len(history) - 1 - filtered.index(h) if h in filtered else -1
+                        try:
+                            st.session_state.comment_history.remove(h)
+                            st.rerun()
+                        except ValueError:
+                            pass
+
+            st.divider()
+
+            # 전체 내보내기
+            st.caption("**히스토리 내보내기**")
+            df_export = pd.DataFrame(history)[["date","media","landing","comment"]]
+            dcol1, dcol2 = st.columns(2)
+            with dcol1:
+                # txt 형식으로 내보내기
+                txt_out = ""
+                for h in history:
+                    landing_str = f" / {h['landing']}" if h.get("landing") else ""
+                    txt_out += f"[{h.get('date','')} / {h.get('media','')}{landing_str}]\n"
+                    txt_out += h.get("comment","").strip() + "\n\n"
+                st.download_button(
+                    "⬇️ txt로 내보내기",
+                    data=txt_out.encode("utf-8-sig"),
+                    file_name=f"comment_history_{datetime.today().strftime('%Y%m%d')}.txt",
+                    mime="text/plain", use_container_width=True,
+                )
+            with dcol2:
+                st.download_button(
+                    "⬇️ csv로 내보내기",
+                    data=df_export.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"comment_history_{datetime.today().strftime('%Y%m%d')}.csv",
+                    mime="text/csv", use_container_width=True,
+                )
