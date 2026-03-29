@@ -385,6 +385,7 @@ if "media_data"        not in st.session_state: st.session_state.media_data     
 if "media_warnings"    not in st.session_state: st.session_state.media_warnings    = {}
 if "raw_reports"       not in st.session_state: st.session_state.raw_reports       = {}
 if "converted_reports" not in st.session_state: st.session_state.converted_reports = {}
+if "comment_history"   not in st.session_state: st.session_state.comment_history   = []
 # raw_reports      : {매체명: DataFrame(표준 REPORT_COLS)}  ← RAW 변환 결과 저장
 # converted_reports: {매체명: DataFrame(표준 REPORT_COLS)}  ← 다중 파일 취합 결과 저장
 
