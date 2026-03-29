@@ -328,10 +328,12 @@ DASHBOARD_MEDIA_LIST = list(MEDIA_COL_MAP.keys())
 # ══════════════════════════════════════════════════════════════
 # 세션 상태 초기화
 # ══════════════════════════════════════════════════════════════
-if "media_data"     not in st.session_state: st.session_state.media_data     = {}
-if "media_warnings" not in st.session_state: st.session_state.media_warnings = {}
-if "raw_reports"    not in st.session_state: st.session_state.raw_reports    = {}
-# raw_reports: {매체명: DataFrame(표준 REPORT_COLS)}  ← RAW 변환 결과 저장
+if "media_data"        not in st.session_state: st.session_state.media_data        = {}
+if "media_warnings"    not in st.session_state: st.session_state.media_warnings    = {}
+if "raw_reports"       not in st.session_state: st.session_state.raw_reports       = {}
+if "converted_reports" not in st.session_state: st.session_state.converted_reports = {}
+# raw_reports      : {매체명: DataFrame(표준 REPORT_COLS)}  ← RAW 변환 결과 저장
+# converted_reports: {매체명: DataFrame(표준 REPORT_COLS)}  ← 다중 파일 취합 결과 저장
 
 # ══════════════════════════════════════════════════════════════
 # ① 코멘트 생성기 전용 함수
@@ -986,18 +988,98 @@ elif page == "🔄 RAW 리포트 변환":
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
     from openpyxl.utils import get_column_letter
 
-    st.title("🔄 RAW 리포트 변환")
-    st.caption("매체별 RAW 파일을 업로드하면 표준 리포트 형식(xlsx)으로 변환해 다운로드할 수 있습니다.")
+    # ── xlsx 빌더 (재사용) ────────────────────────────────────
+    def build_xlsx(df_out, sheet_title="Report"):
+        HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
+        HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+        DATA_FONT   = Font(name="Arial", size=10)
+        CENTER = Alignment(horizontal="center", vertical="center")
+        LEFT   = Alignment(horizontal="left",   vertical="center")
+        RIGHT  = Alignment(horizontal="right",  vertical="center")
+        THIN   = Side(style="thin", color="D0D0D0")
+        BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+        ALT_FILL = PatternFill("solid", fgColor="EBF3FB")
+        NUM_FMT = {"비용":"#,##0.00","노출":"#,##0","클릭":"#,##0",
+                   "구매":"#,##0","매출액":"#,##0","장바구니":"#,##0",
+                   "도달":"#,##0","참여":"#,##0","팔로우":"#,##0","동영상 조회":"#,##0"}
+        COL_W = {"날짜":13,"캠페인명":22,"광고그룹명":20,"광고명":20,
+                 "비용":14,"노출":12,"클릭":10,"구매":10,"매출액":14,
+                 "장바구니":12,"도달":10,"참여":10,"팔로우":10,"동영상 조회":13}
+        wb = Workbook(); ws = wb.active; ws.title = sheet_title[:31]
+        for ci, col in enumerate(REPORT_COLS, 1):
+            cell = ws.cell(row=1, column=ci, value=col)
+            cell.font=HEADER_FONT; cell.fill=HEADER_FILL
+            cell.alignment=CENTER; cell.border=BORDER
+        for ri, row in df_out.reset_index(drop=True).iterrows():
+            fill = ALT_FILL if ri % 2 == 1 else None
+            for ci, col in enumerate(REPORT_COLS, 1):
+                val = row.get(col)
+                if isinstance(val, float) and pd.isna(val): val = None
+                if val is None and col not in ["참여","팔로우"]: val = None
+                cell = ws.cell(row=ri+2, column=ci, value=val)
+                cell.font=DATA_FONT; cell.border=BORDER
+                if fill: cell.fill=fill
+                cell.alignment = RIGHT if col in NUM_FMT else (CENTER if col=="날짜" else LEFT)
+                if col in NUM_FMT and val is not None:
+                    cell.number_format = NUM_FMT[col]
+        for ci, col in enumerate(REPORT_COLS, 1):
+            ws.column_dimensions[get_column_letter(ci)].width = COL_W.get(col, 12)
+        ws.row_dimensions[1].height = 22
+        for ri in range(2, len(df_out)+2): ws.row_dimensions[ri].height = 18
+        ws.freeze_panes = "A2"
+        buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+        return buf
 
+    # ── KPI 요약 테이블 생성 ───────────────────────────────────
+    def make_kpi_summary(df_converted):
+        df_k = df_converted.copy()
+        df_k["날짜str"] = pd.to_datetime(df_k["날짜"], errors="coerce").dt.strftime("%Y-%m-%d")
+        grp = df_k.groupby("날짜str").agg(
+            비용=("비용","sum"), 노출=("노출","sum"), 클릭=("클릭","sum"),
+            구매=("구매","sum"), 매출액=("매출액","sum"), 장바구니=("장바구니","sum")
+        ).reset_index().rename(columns={"날짜str":"날짜"})
+        rows_k = []
+        for _, r in grp.iterrows():
+            sp=r["비용"]; cl=r["클릭"]; pu=r["구매"]; rv=r["매출액"]
+            rows_k.append({
+                "날짜":    r["날짜"],
+                "비용":    f"{sp:,.0f}",
+                "노출":    f"{int(r['노출']):,}",
+                "클릭":    f"{int(cl):,}",
+                "CTR":     f"{cl/r['노출']*100:.2f}%" if r["노출"] else "-",
+                "구매":    f"{int(pu):,}",
+                "CVR":     f"{pu/cl*100:.2f}%" if cl else "-",
+                "매출액":  f"{int(rv):,}",
+                "ROAS":    f"{rv/sp*100:.0f}%" if sp else "-",
+                "장바구니":f"{int(r['장바구니']):,}",
+            })
+        return pd.DataFrame(rows_k)
+
+    st.title("🔄 RAW 리포트 변환")
+    st.caption("매체별 RAW 파일을 여러 개 업로드해 취합한 뒤 표준 리포트 xlsx로 변환합니다.")
+
+    # ── 사이드바 ─────────────────────────────────────────────
     with st.sidebar:
         st.subheader("🔄 변환 설정")
         conv_media = st.selectbox("매체 선택", list(TRANSFORM_MAP.keys()), key="conv_media")
-        st.caption(f"현재 변환 가능 매체: {', '.join(TRANSFORM_MAP.keys())}")
-        st.info("다른 매체는 순차적으로 추가 예정입니다.")
+        st.caption(f"지원 매체: {', '.join(TRANSFORM_MAP.keys())}")
+        st.divider()
 
-    st.subheader(f"{conv_media} RAW → 표준 리포트")
+        # 누적된 변환 결과 현황
+        st.subheader("📦 변환 현황")
+        if st.session_state.converted_reports:
+            for m, df_c in st.session_state.converted_reports.items():
+                dates = pd.to_datetime(df_c["날짜"], errors="coerce").dt.date.dropna()
+                date_range = f"{dates.min()} ~ {dates.max()}" if not dates.empty else "날짜 없음"
+                st.caption(f"🟢 {m} — {len(df_c):,}행 ({date_range})")
+        else:
+            st.caption("아직 변환된 데이터 없음")
+        st.divider()
+        if st.button("🗑️ 변환 데이터 초기화", use_container_width=True, key="conv_reset"):
+            st.session_state.converted_reports = {}
+            st.rerun()
 
-    # 변환 규칙 안내
+    # ── 변환 규칙 안내 ────────────────────────────────────────
     with st.expander("📋 변환 규칙 확인", expanded=False):
         if conv_media == "Naver ADVoost":
             st.markdown("""
@@ -1037,81 +1119,179 @@ elif page == "🔄 RAW 리포트 변환":
 | Instagram 팔로우 | 팔로우 | 컬럼 없으면 빈 칸 | 참여 |
             """)
 
-    conv_file = st.file_uploader(f"📂 {conv_media} RAW 파일 업로드", type=["csv","xlsx"],
-                                  key="conv_upload")
+    # ══════════════════════════════════════════════════════════
+    # 매체별 변환 섹션
+    # ══════════════════════════════════════════════════════════
+    section(f"▣ {conv_media} — RAW 파일 업로드 (여러 파일 동시 가능)")
 
-    if conv_file:
+    conv_files = st.file_uploader(
+        f"{conv_media} RAW 파일 업로드 (여러 개 가능)",
+        type=["csv", "xlsx"],
+        accept_multiple_files=True,
+        key="conv_upload",
+        label_visibility="collapsed",
+    )
+
+    if conv_files:
         try:
-            df_raw = (pd.read_csv(conv_file, encoding="utf-8-sig")
-                      if conv_file.name.endswith(".csv") else pd.read_excel(conv_file, sheet_name=0))
-
-            st.caption(f"원본 컬럼: {df_raw.columns.tolist()}")
-
-            # 변환 실행
+            dfs = []
+            file_log = []
             transform_fn = TRANSFORM_MAP[conv_media]
-            df_converted = transform_fn(df_raw)
 
-            st.success(f"✅ 변환 완료 — {len(df_converted)}행")
+            for f in conv_files:
+                df_raw = (pd.read_csv(f, encoding="utf-8-sig")
+                          if f.name.endswith(".csv") else pd.read_excel(f, sheet_name=0))
+                df_c = transform_fn(df_raw)
+                dfs.append(df_c)
+                file_log.append(f"✅ `{f.name}` — {len(df_c)}행")
+
+            # 파일 목록 표시
+            for log in file_log:
+                st.caption(log)
+
+            # 여러 파일 concat + 날짜·캠페인 정렬
+            df_merged = pd.concat(dfs, ignore_index=True).sort_values(
+                ["날짜", "캠페인명", "광고그룹명", "광고명"]
+            ).reset_index(drop=True)
+
+            st.success(f"✅ {len(conv_files)}개 파일 취합 완료 — 총 {len(df_merged):,}행")
+
+            # session_state에 저장 (기존 같은 매체 데이터와 병합)
+            if conv_media in st.session_state.converted_reports:
+                existing = st.session_state.converted_reports[conv_media]
+                df_merged = pd.concat([existing, df_merged], ignore_index=True).drop_duplicates(
+                    subset=["날짜", "캠페인명", "광고그룹명", "광고명"]
+                ).sort_values(["날짜", "캠페인명", "광고그룹명", "광고명"]).reset_index(drop=True)
+                st.info(f"💡 기존 {conv_media} 데이터와 병합 → 총 {len(df_merged):,}행")
+
+            st.session_state.converted_reports[conv_media] = df_merged
 
             # 미리보기
             section("▣ 변환 결과 미리보기")
-            st.dataframe(df_converted, use_container_width=True, height=220, hide_index=True)
+            st.dataframe(df_merged, use_container_width=True, height=240, hide_index=True)
 
             # KPI 요약
-            section("▣ 기간별 KPI 요약")
-            df_kpi = df_converted.copy()
-            df_kpi["날짜str"] = pd.to_datetime(df_kpi["날짜"], errors="coerce").dt.strftime("%Y-%m-%d")
-            grp = df_kpi.groupby("날짜str").agg(
-                비용=("비용","sum"), 노출=("노출","sum"), 클릭=("클릭","sum"),
-                구매=("구매","sum"), 매출액=("매출액","sum"), 장바구니=("장바구니","sum")
-            ).reset_index().rename(columns={"날짜str":"날짜"})
+            section("▣ 날짜별 KPI 요약")
+            st.dataframe(make_kpi_summary(df_merged), use_container_width=True, hide_index=True)
 
-            rows_kpi = []
-            for _, r in grp.iterrows():
-                sp=r["비용"]; cl=r["클릭"]; pu=r["구매"]; rv=r["매출액"]
-                rows_kpi.append({
-                    "날짜":  r["날짜"],
-                    "비용":  f"{sp:,.0f}",
-                    "노출":  f"{int(r['노출']):,}",
-                    "클릭":  f"{int(cl):,}",
-                    "CTR":   f"{cl/r['노출']*100:.2f}%" if r["노출"] else "-",
-                    "구매":  f"{int(pu):,}",
-                    "CVR":   f"{pu/cl*100:.2f}%" if cl else "-",
-                    "매출액": f"{int(rv):,}",
-                    "ROAS":  f"{rv/sp*100:.0f}%" if sp else "-",
-                    "장바구니": f"{int(r['장바구니']):,}",
-                })
-            st.dataframe(pd.DataFrame(rows_kpi), use_container_width=True, hide_index=True)
+            # 매체 단일 xlsx 다운로드
+            section(f"▣ {conv_media} 단독 xlsx 다운로드")
+            buf_single = build_xlsx(df_merged, sheet_title=f"{conv_media}_RAW")
+            st.download_button(
+                label=f"⬇️ {conv_media} 리포트 xlsx",
+                data=buf_single,
+                file_name=f"{conv_media}_report_{datetime.today().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
 
-            # xlsx 생성 및 다운로드
-            section("▣ xlsx 다운로드")
+        except Exception as e:
+            st.error(f"변환 오류: {e}")
+            import traceback
+            st.code(traceback.format_exc())
 
-            def build_xlsx(df_out):
-                HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
-                HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=10)
-                DATA_FONT   = Font(name="Arial", size=10)
-                CENTER      = Alignment(horizontal="center", vertical="center")
-                LEFT        = Alignment(horizontal="left",   vertical="center")
-                RIGHT       = Alignment(horizontal="right",  vertical="center")
-                THIN        = Side(style="thin", color="D0D0D0")
-                BORDER      = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
-                ALT_FILL    = PatternFill("solid", fgColor="EBF3FB")
-                NUM_FMT     = {"비용":"#,##0.00","노출":"#,##0","클릭":"#,##0",
-                               "구매":"#,##0","매출액":"#,##0","장바구니":"#,##0"}
-                COL_W       = {"날짜":13,"캠페인명":22,"광고그룹명":20,"광고명":20,
-                               "비용":14,"노출":12,"클릭":10,"구매":10,"매출액":14,
-                               "장바구니":12,"도달":10,"참여":10,"팔로우":10,"동영상 조회":13}
-                wb = Workbook(); ws = wb.active; ws.title = f"{conv_media}_RAW"
+    else:
+        st.info(f"👆 {conv_media} RAW 파일(csv 또는 xlsx)을 하나 이상 업로드하세요.")
+        st.markdown("""
+**지원 파일 형식:**
+- Naver ADVoost: 네이버 성과형 디스플레이 광고 → 애셋 그룹 보고서 (csv)
+- Meta: Meta 광고 관리자 → 광고 단위 일별 보고서 (csv / xlsx)
+
+**추후 추가 예정:** TikTok, Kakao, Naver SSA/BSA, Criteo, Buzzvil
+        """)
+
+    # ══════════════════════════════════════════════════════════
+    # 통합 리포트 섹션
+    # ══════════════════════════════════════════════════════════
+    if st.session_state.converted_reports:
+        st.divider()
+        section("▣ 전체 매체 통합 리포트")
+
+        # 모든 매체 변환 데이터 concat
+        all_converted = []
+        for m, df_c in st.session_state.converted_reports.items():
+            df_c2 = df_c.copy()
+            df_c2["매체"] = m   # 매체 컬럼 추가 (통합 뷰에서 구분용)
+            all_converted.append(df_c2)
+
+        df_total = pd.concat(all_converted, ignore_index=True).sort_values(
+            ["날짜", "매체", "캠페인명", "광고그룹명", "광고명"]
+        ).reset_index(drop=True)
+
+        # 현황 카드
+        media_list = list(st.session_state.converted_reports.keys())
+        c_cols = st.columns(len(media_list) + 1)
+        for i, m in enumerate(media_list):
+            df_m = st.session_state.converted_reports[m]
+            c_cols[i].metric(m, f"{len(df_m):,}행")
+        c_cols[-1].metric("전체 합계", f"{len(df_total):,}행")
+
+        # 통합 미리보기 (매체 컬럼 포함)
+        preview_cols = ["날짜", "매체"] + [c for c in REPORT_COLS if c != "날짜"]
+        st.dataframe(
+            df_total[preview_cols].head(50),
+            use_container_width=True, height=300, hide_index=True
+        )
+
+        # 날짜 × 매체별 KPI 요약
+        section("▣ 날짜 × 매체별 KPI 요약")
+        df_t2 = df_total.copy()
+        df_t2["날짜str"] = pd.to_datetime(df_t2["날짜"], errors="coerce").dt.strftime("%Y-%m-%d")
+        grp_t = df_t2.groupby(["날짜str","매체"]).agg(
+            비용=("비용","sum"), 노출=("노출","sum"), 클릭=("클릭","sum"),
+            구매=("구매","sum"), 매출액=("매출액","sum")
+        ).reset_index().rename(columns={"날짜str":"날짜"})
+        rows_t = []
+        for _, r in grp_t.iterrows():
+            sp=r["비용"]; cl=r["클릭"]; pu=r["구매"]; rv=r["매출액"]
+            rows_t.append({
+                "날짜":   r["날짜"], "매체": r["매체"],
+                "비용":   f"{sp:,.0f}",
+                "노출":   f"{int(r['노출']):,}",
+                "클릭":   f"{int(cl):,}",
+                "CTR":    f"{cl/r['노출']*100:.2f}%" if r["노출"] else "-",
+                "구매":   f"{int(pu):,}",
+                "CVR":    f"{pu/cl*100:.2f}%" if cl else "-",
+                "매출액": f"{int(rv):,}",
+                "ROAS":  f"{rv/sp*100:.0f}%" if sp else "-",
+            })
+        st.dataframe(pd.DataFrame(rows_t), use_container_width=True, hide_index=True)
+
+        # 통합 xlsx 다운로드 (매체별 시트 분리)
+        section("▣ 통합 리포트 xlsx 다운로드")
+        st.caption("매체별 시트 + Total_Raw 시트가 포함된 통합 xlsx로 다운로드됩니다.")
+
+        def build_integrated_xlsx():
+            from openpyxl import Workbook
+            from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+            from openpyxl.utils import get_column_letter
+
+            HEADER_FILL  = PatternFill("solid", fgColor="1F4E79")
+            HEADER_FONT  = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+            DATA_FONT    = Font(name="Arial", size=10)
+            CENTER  = Alignment(horizontal="center", vertical="center")
+            LEFT    = Alignment(horizontal="left",   vertical="center")
+            RIGHT   = Alignment(horizontal="right",  vertical="center")
+            THIN    = Side(style="thin", color="D0D0D0")
+            BORDER  = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+            ALT_FILL = PatternFill("solid", fgColor="EBF3FB")
+            NUM_FMT = {"비용":"#,##0.00","노출":"#,##0","클릭":"#,##0",
+                       "구매":"#,##0","매출액":"#,##0","장바구니":"#,##0",
+                       "도달":"#,##0","참여":"#,##0","팔로우":"#,##0","동영상 조회":"#,##0"}
+            COL_W = {"날짜":13,"캠페인명":22,"광고그룹명":20,"광고명":20,
+                     "비용":14,"노출":12,"클릭":10,"구매":10,"매출액":14,
+                     "장바구니":12,"도달":10,"참여":10,"팔로우":10,"동영상 조회":13}
+
+            def write_sheet(ws, df_out):
                 for ci, col in enumerate(REPORT_COLS, 1):
                     cell = ws.cell(row=1, column=ci, value=col)
                     cell.font=HEADER_FONT; cell.fill=HEADER_FILL
                     cell.alignment=CENTER; cell.border=BORDER
-                for ri, row in df_out.iterrows():
+                for ri, row in df_out.reset_index(drop=True).iterrows():
                     fill = ALT_FILL if ri % 2 == 1 else None
                     for ci, col in enumerate(REPORT_COLS, 1):
                         val = row.get(col)
-                        if pd.isna(val) if isinstance(val, float) else val is None:
-                            val = None
+                        if isinstance(val, float) and pd.isna(val): val = None
                         cell = ws.cell(row=ri+2, column=ci, value=val)
                         cell.font=DATA_FONT; cell.border=BORDER
                         if fill: cell.fill=fill
@@ -1123,30 +1303,40 @@ elif page == "🔄 RAW 리포트 변환":
                 ws.row_dimensions[1].height = 22
                 for ri in range(2, len(df_out)+2): ws.row_dimensions[ri].height = 18
                 ws.freeze_panes = "A2"
-                buf = io.BytesIO(); wb.save(buf); buf.seek(0)
-                return buf
 
-            buf = build_xlsx(df_converted)
-            fname = f"{conv_media}_report_{datetime.today().strftime('%Y%m%d')}.xlsx"
+            wb = Workbook()
+            wb.remove(wb.active)  # 기본 시트 제거
+
+            # ① 매체별 시트
+            for m, df_m in st.session_state.converted_reports.items():
+                ws = wb.create_sheet(title=m[:31])
+                write_sheet(ws, df_m)
+
+            # ② Total_Raw 시트 (모든 매체 합산, 날짜순)
+            ws_total = wb.create_sheet(title="Total_Raw")
+            write_sheet(ws_total, df_total[REPORT_COLS])
+
+            buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+            return buf
+
+        col_dl1, col_dl2 = st.columns(2)
+        with col_dl1:
+            buf_integrated = build_integrated_xlsx()
             st.download_button(
-                label="⬇️ xlsx 다운로드",
-                data=buf,
-                file_name=fname,
+                label="⬇️ 통합 리포트 xlsx (매체별 시트 + Total_Raw)",
+                data=buf_integrated,
+                file_name=f"통합리포트_{datetime.today().strftime('%Y%m%d')}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 type="primary",
                 use_container_width=True,
             )
-
-        except Exception as e:
-            st.error(f"변환 오류: {e}")
-            import traceback
-            st.code(traceback.format_exc())
-    else:
-        st.info(f"👆 {conv_media} RAW 파일(csv 또는 xlsx)을 업로드하세요.")
-        st.markdown("""
-**지원 파일 형식:**
-- Naver ADVoost: 네이버 성과형 디스플레이 광고 → 애셋 그룹 보고서 (csv)
-- Meta: Meta 광고 관리자 → 광고 단위 일별 보고서 (csv)
-
-**추후 추가 예정:** TikTok, Kakao, Naver SSA/BSA, Criteo, Buzzvil
-        """)
+        with col_dl2:
+            # Total_Raw만 단독 다운로드
+            buf_raw_only = build_xlsx(df_total[REPORT_COLS], sheet_title="Total_Raw")
+            st.download_button(
+                label="⬇️ Total_Raw만 xlsx",
+                data=buf_raw_only,
+                file_name=f"Total_Raw_{datetime.today().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
