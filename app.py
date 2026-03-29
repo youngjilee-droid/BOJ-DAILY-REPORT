@@ -36,18 +36,8 @@ st.markdown("""
 # 공통 상수
 # ══════════════════════════════════════════════════════════════
 
-# 랜딩페이지 표시명 정규화 (RAW값 → 표시명)
-LANDING_LABEL = {
-    "네이버 브랜드스토어": "네이버 브랜드스토어",
-    "올리브영":           "올리브영",
-    "카카오톡 스토어":    "카카오톡 스토어",
-    "카카오톡 채널":      "카카오톡 채널",
-    "카카오톡 선물하기":  "카카오톡 선물하기",
-    "인스타그램":         "인스타그램",
-}
 LANDING_ALL = "전체"
 
-# 코멘트 생성기용 매체 매핑 (캠페인명 키워드 기준)
 COMMENT_MEDIA_MAP = {
     "Meta":          {"campaigns": ["Meta"],           "label": "Meta"},
     "TikTok":        {"campaigns": ["TikTok"],          "label": "TikTok"},
@@ -60,6 +50,11 @@ COMMENT_MEDIA_MAP = {
     "Push":          {"campaigns": ["Push"],            "label": "Push"},
     "전체":           {"campaigns": [],                 "label": "전체"},
 }
+
+# 리포트 표준 컬럼 순서 (Total_Raw 기준)
+REPORT_COLS = ["날짜", "캠페인명", "광고그룹명", "광고명",
+               "비용", "노출", "클릭", "구매", "매출액", "장바구니",
+               "도달", "참여", "팔로우", "동영상 조회"]
 
 # 대시보드용 표준 컬럼
 STD_COLS = {
@@ -76,7 +71,82 @@ STD_COLS = {
     "landing":    "랜딩페이지",
 }
 
-# 대시보드용 매체별 RAW 컬럼 매핑
+# ══════════════════════════════════════════════════════════════
+# RAW 변환 로직 — 매체별 transform 함수
+# 각 함수는 RAW DataFrame → 표준 REPORT_COLS DataFrame 반환
+# 비용은 모두 VAT 제외 처리 (총비용 / 1.1) 여부를 매체별로 명시
+# ══════════════════════════════════════════════════════════════
+
+def _to_int(v, default=0):
+    try:
+        return int(float(str(v).replace(",", "")))
+    except:
+        return default
+
+def _to_float(v, default=0.0):
+    try:
+        return round(float(str(v).replace(",", "")), 2)
+    except:
+        return default
+
+def _parse_date_dot(s):
+    """'2026.03.28.' → '2026-03-28'"""
+    s = str(s).strip().rstrip(".")
+    parts = s.split(".")
+    if len(parts) == 3:
+        return f"{parts[0]}-{parts[1]}-{parts[2]}"
+    return s
+
+def transform_advoost(df_raw):
+    """
+    Naver ADVoost RAW → 표준 리포트 컬럼
+    - 날짜   : 기간 ('2026.03.28.' 형식)
+    - 캠페인명: 캠페인 이름
+    - 광고그룹명: 애셋 그룹 이름
+    - 광고명  : 'Asset_all_items' 고정
+    - 비용   : 총 비용 / 1.1 (VAT 제외)
+    - 노출   : 노출
+    - 클릭   : 클릭
+    - 구매   : 구매완료수
+    - 매출액  : 구매완료 전환 매출액
+    - 장바구니: 장바구니 담기수
+    - 도달~동영상 조회: None (ADVoost 미제공)
+    """
+    rows = []
+    for _, r in df_raw.iterrows():
+        rows.append({
+            "날짜":       _parse_date_dot(r.get("기간", "")),
+            "캠페인명":   str(r.get("캠페인 이름", "")).strip(),
+            "광고그룹명": str(r.get("애셋 그룹 이름", "")).strip(),
+            "광고명":     "Asset_all_items",
+            "비용":       _to_float(r.get("총 비용", 0)) / 1.1,
+            "노출":       _to_int(r.get("노출", 0)),
+            "클릭":       _to_int(r.get("클릭", 0)),
+            "구매":       _to_int(r.get("구매완료수", 0)),
+            "매출액":     _to_int(r.get("구매완료 전환 매출액", 0)),
+            "장바구니":   _to_int(r.get("장바구니 담기수", 0)),
+            "도달":       None,
+            "참여":       None,
+            "팔로우":     None,
+            "동영상 조회": None,
+        })
+    df = pd.DataFrame(rows, columns=REPORT_COLS)
+    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+    return df.sort_values("날짜", ascending=False).reset_index(drop=True)
+
+
+# 매체명 → transform 함수 매핑
+# 다른 매체 추가 시 여기에 함수 등록만 하면 됨
+TRANSFORM_MAP = {
+    "Naver ADVoost": transform_advoost,
+    # "Meta":   transform_meta,   ← 추후 추가
+    # "TikTok": transform_tiktok,
+    # "Kakao":  transform_kakao,
+}
+
+# ══════════════════════════════════════════════════════════════
+# 대시보드용 매체별 RAW 컬럼 매핑 (기존 대시보드 뷰용)
+# ══════════════════════════════════════════════════════════════
 MEDIA_COL_MAP = {
     "Meta": {
         "date":       ["날짜", "Date", "일자", "기간"],
@@ -170,16 +240,17 @@ MEDIA_COL_MAP = {
         "landing":    ["랜딩페이지", None],
     },
     "Naver ADVoost": {
-        "date":       ["날짜", "일자"],
+        # 변환 함수(transform_advoost)가 있어서 컬럼 매핑은 변환 후 표준 컬럼 기준으로 동작
+        "date":       ["날짜"],
         "campaign":   ["캠페인명"],
         "adgroup":    ["광고그룹명"],
         "ad":         ["광고명"],
-        "spend":      ["비용", "광고비"],
-        "impression": ["노출수", "노출"],
-        "click":      ["클릭수", "클릭"],
-        "purchase":   ["구매수", "전환수"],
-        "revenue":    ["구매금액", "전환매출"],
-        "cart":       [None],
+        "spend":      ["비용"],
+        "impression": ["노출"],
+        "click":      ["클릭"],
+        "purchase":   ["구매"],
+        "revenue":    ["매출액"],
+        "cart":       ["장바구니"],
         "landing":    ["랜딩페이지", None],
     },
     "Push": {
@@ -204,6 +275,8 @@ DASHBOARD_MEDIA_LIST = list(MEDIA_COL_MAP.keys())
 # ══════════════════════════════════════════════════════════════
 if "media_data"     not in st.session_state: st.session_state.media_data     = {}
 if "media_warnings" not in st.session_state: st.session_state.media_warnings = {}
+if "raw_reports"    not in st.session_state: st.session_state.raw_reports    = {}
+# raw_reports: {매체명: DataFrame(표준 REPORT_COLS)}  ← RAW 변환 결과 저장
 
 # ══════════════════════════════════════════════════════════════
 # ① 코멘트 생성기 전용 함수
@@ -220,7 +293,6 @@ def fmt_roas(spend, revenue):
     return f"{revenue/spend*100:.0f}%"
 
 def load_report_raw(file):
-    """Total_Raw 시트 로드 — 랜딩페이지 컬럼 포함"""
     wb = openpyxl.load_workbook(file, data_only=True, read_only=True)
     ws = wb["Total_Raw"]
     rows, headers = [], None
@@ -236,7 +308,6 @@ def load_report_raw(file):
     df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
     for c in ["비용", "구매", "매출액", "클릭", "노출"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
-    # 랜딩페이지 컬럼 정리
     if "랜딩페이지" in df.columns:
         df["랜딩페이지"] = df["랜딩페이지"].fillna("미분류").astype(str).str.strip()
     else:
@@ -249,11 +320,13 @@ def filter_media(df, media_key):
     return df[df["캠페인명"].str.contains("|".join(kws), case=False, na=False)]
 
 def agg_kpi(df):
-    sp = df["비용"].sum(); pu = df["구매"].sum(); rv = df["매출액"].sum()
-    return {"spend": sp, "purchase": pu, "revenue": rv,
-            "click": df["클릭"].sum(), "impression": df["노출"].sum()}
+    return {"spend": df["비용"].sum(), "purchase": df["구매"].sum(),
+            "revenue": df["매출액"].sum(), "click": df["클릭"].sum(),
+            "impression": df["노출"].sum()}
 
-def daily_agg(df, dt):  return agg_kpi(df[df["날짜"].dt.date == dt.date()])
+def daily_agg(df, dt):
+    return agg_kpi(df[df["날짜"].dt.date == dt.date()])
+
 def period_agg(df, s, e):
     return agg_kpi(df[(df["날짜"].dt.date >= s.date()) & (df["날짜"].dt.date <= e.date())])
 
@@ -264,7 +337,8 @@ def prev_week_avg(df, dt):
     if len(d) == 0: return None
     days = max(d["날짜"].dt.date.nunique(), 1)
     sp = d["비용"].sum()
-    return {"spend": sp/days, "purchase": d["구매"].sum()/days, "revenue": d["매출액"].sum()/days,
+    return {"spend": sp/days, "purchase": d["구매"].sum()/days,
+            "revenue": d["매출액"].sum()/days,
             "roas": d["매출액"].sum()/sp*100 if sp > 0 else 0}
 
 def build_topline(label, target_dt, today, prev_day, pw, monthly, weekly, rtype):
@@ -281,15 +355,15 @@ def build_topline(label, target_dt, today, prev_day, pw, monthly, weekly, rtype)
                 .replace("Mon","월").replace("Tue","화").replace("Wed","수")
                 .replace("Thu","목").replace("Fri","금").replace("Sat","토").replace("Sun","일"))
     out = f"* {label}\n"
-    if rtype in ["daily","both"]:
+    if rtype in ["daily", "both"]:
         out += (f"- {date_str} 광고비 {fmt_won(today['spend'])} 소진, 구매 건수 {int(today['purchase']):,}건 및 "
                 f"매출 {fmt_won(today['revenue'])} 확보 (ROAS {today_roas}){prev_note}{week_note}\n")
-    if rtype in ["weekly","both"] and weekly:
+    if rtype in ["weekly", "both"] and weekly:
         out += (f"- 주간 광고비 {fmt_won(weekly['spend'])} 소진, 구매 건수 {int(weekly['purchase']):,}건 및 "
-                f"매출 {fmt_won(weekly['revenue'])} 확보 (ROAS {fmt_roas(weekly['spend'],weekly['revenue'])})\n")
+                f"매출 {fmt_won(weekly['revenue'])} 확보 (ROAS {fmt_roas(weekly['spend'], weekly['revenue'])})\n")
     if monthly:
         out += (f"- {target_dt.month}월 누적 광고비 {fmt_won(monthly['spend'])} 소진, 구매 건수 {int(monthly['purchase']):,}건 및 "
-                f"매출 {fmt_won(monthly['revenue'])} 확보 (ROAS {fmt_roas(monthly['spend'],monthly['revenue'])})\n")
+                f"매출 {fmt_won(monthly['revenue'])} 확보 (ROAS {fmt_roas(monthly['spend'], monthly['revenue'])})\n")
     return out
 
 def gen_ai_insight(api_key, today, prev_day, pw, label, target_dt, note=""):
@@ -309,7 +383,7 @@ def gen_ai_insight(api_key, today, prev_day, pw, label, target_dt, note=""):
 
 규칙: 2~4줄 bullet(ㄴ/-), 유의미한 변화만, ROAS 효율 원인 추정, "약 X만 원"/"X%p 상승/하락" 형식, 인사말 없이 바로 시작."""
         resp = client.chat.completions.create(
-            model="gpt-4o-mini", messages=[{"role":"user","content":prompt}],
+            model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}],
             max_tokens=400, temperature=0.3)
         return resp.choices[0].message.content.strip()
     except Exception as e:
@@ -317,10 +391,7 @@ def gen_ai_insight(api_key, today, prev_day, pw, label, target_dt, note=""):
 
 def render_media_comment(mk, df_m, target_dt, prev_day_dt, month_start, week_start,
                           rtype, api_key, note, all_comments):
-    """매체 하나의 코멘트 렌더링 — 전체 + 랜딩별 분리"""
     label = COMMENT_MEDIA_MAP[mk]["label"]
-
-    # 해당 매체의 랜딩 목록 파악
     landings_in_media = sorted(df_m["랜딩페이지"].dropna().unique().tolist())
     landings_in_media = [l for l in landings_in_media if l not in ("미분류", "nan", "")]
     has_multi_landing = len(landings_in_media) > 1
@@ -332,16 +403,14 @@ def render_media_comment(mk, df_m, target_dt, prev_day_dt, month_start, week_sta
         prev_d  = daily_agg(df_sub, prev_day_dt)
         pw      = prev_week_avg(df_sub, target_dt)
         monthly = period_agg(df_sub, month_start, target_dt)
-        weekly  = period_agg(df_sub, week_start, target_dt) if rtype in ["weekly","both"] else None
-
+        weekly  = period_agg(df_sub, week_start, target_dt) if rtype in ["weekly", "both"] else None
         roas_val = today_d["revenue"]/today_d["spend"]*100 if today_d["spend"] else 0
-        c1,c2,c3,c4 = st.columns(4)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("광고비",   fmt_won(today_d["spend"]))
         c2.metric("구매건수", f"{int(today_d['purchase']):,}건")
         c3.metric("매출",     fmt_won(today_d["revenue"]))
         c4.metric("ROAS",     f"{roas_val:.0f}%",
                   delta=f"{roas_val-(pw['roas'] if pw else 0):+.0f}%p vs 전주" if pw else None)
-
         topline = build_topline(sub_label, target_dt, today_d, prev_d, pw, monthly, weekly, rtype)
         insight = ""
         if api_key and today_d["spend"] > 0:
@@ -355,35 +424,26 @@ def render_media_comment(mk, df_m, target_dt, prev_day_dt, month_start, week_sta
         return full, f"[{sub_label}]\n{full}"
 
     st.markdown(f"### {label}")
-
-    # ── 전체 합산 블록
-    section_label = f"{label} (전체)"
-    full, entry = _render_block(df_m, section_label)
+    full, entry = _render_block(df_m, f"{label} (전체)")
     if full is None:
         m_dates = sorted(df_m["날짜"].dt.date.dropna().unique())
         st.warning(f"⚠️ {mk}: {target_dt.date()} 데이터 없음 (최신: {max(m_dates) if m_dates else '없음'})")
         st.divider()
         return
-
-    # 전체 합산 텍스트 에어리어
     st.text_area("전체 합산", value=full, height=160, key=f"comment_{mk}_all")
     if entry: all_comments.append(entry)
-
-    # ── 랜딩별 블록 (멀티 랜딩인 경우만)
     if has_multi_landing:
         st.markdown('<div class="landing-header">랜딩별 상세</div>', unsafe_allow_html=True)
         for landing in landings_in_media:
             df_land = df_m[df_m["랜딩페이지"] == landing]
             if df_land.empty: continue
             with st.expander(f"📍 {landing}", expanded=True):
-                sub_label = f"{label} — {landing}"
-                full_l, entry_l = _render_block(df_land, sub_label)
+                full_l, entry_l = _render_block(df_land, f"{label} — {landing}")
                 if full_l:
                     st.text_area("코멘트", value=full_l, height=160, key=f"comment_{mk}_{landing}")
                     if entry_l: all_comments.append(entry_l)
                 else:
                     st.caption("해당 날짜 데이터 없음")
-
     st.divider()
 
 
@@ -418,6 +478,27 @@ def detect_col(df_cols, candidates):
     return None
 
 def normalize_df(df_raw, media):
+    """RAW → 대시보드 표준 컬럼 변환 (transform_map 우선, 없으면 컬럼 매핑)"""
+    # ① transform 함수가 등록된 매체는 전용 변환 로직 사용
+    if media in TRANSFORM_MAP:
+        df = TRANSFORM_MAP[media](df_raw).copy()
+        # 표준 컬럼명으로 rename (REPORT_COLS → STD_COLS 표시명)
+        # 날짜 타입 보장
+        df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+        for col in ["비용", "노출", "클릭", "구매", "매출액", "장바구니"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+            else:
+                df[col] = 0
+        # 대시보드에서 쓰는 광고명/소재명 컬럼 추가
+        df["광고명/소재명"] = df["광고명"] if "광고명" in df.columns else ""
+        # 랜딩페이지 — ADVoost는 네이버 브랜드스토어 단일 랜딩
+        df["랜딩페이지"] = "네이버 브랜드스토어"
+        df["매체"] = media
+        missing = []   # transform 함수가 완전 처리하므로 미매핑 없음
+        return df, missing
+
+    # ② 일반 컬럼 매핑 방식
     mapping = MEDIA_COL_MAP.get(media, {})
     cols = df_raw.columns.tolist()
     result, missing = {}, []
@@ -427,16 +508,15 @@ def normalize_df(df_raw, media):
             result[std_name] = df_raw[found]
         else:
             result[std_name] = pd.Series([None]*len(df_raw))
-            if std_key not in ["cart","ad","landing"]:
+            if std_key not in ["cart", "ad", "landing"]:
                 missing.append(std_name)
     df = pd.DataFrame(result)
     df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
-    for col in ["비용","노출","클릭","구매","매출액","장바구니"]:
+    for col in ["비용", "노출", "클릭", "구매", "매출액", "장바구니"]:
         df[col] = pd.to_numeric(
-            df[col].astype(str).str.replace(",","").str.replace("₩","").str.strip(),
+            df[col].astype(str).str.replace(",", "").str.replace("₩", "").str.strip(),
             errors="coerce").fillna(0)
     df["랜딩페이지"] = df["랜딩페이지"].fillna("미분류").astype(str).str.strip()
-    # 매체명 컬럼 추가
     df["매체"] = media
     return df, missing
 
@@ -481,31 +561,11 @@ def show_table(df, height=320):
     st.dataframe(df, use_container_width=True, height=height, hide_index=True)
 
 def make_agg_table(df, group_cols):
-    """group_cols 기준으로 집계 후 KPI 컬럼 추가"""
     grp = df.groupby(group_cols).agg(
         비용=("비용","sum"), 노출=("노출","sum"), 클릭=("클릭","sum"),
         구매=("구매","sum"), 매출액=("매출액","sum")
     ).reset_index()
     return kpi_table(grp)
-
-def landing_filter_ui(df, key_prefix):
-    """랜딩 필터 UI — 선택값과 필터링된 df 반환"""
-    landings = sorted(df["랜딩페이지"].dropna().unique().tolist())
-    landings = [l for l in landings if l not in ("미분류","nan","")]
-    opts = [LANDING_ALL] + landings
-    sel = st.selectbox("랜딩 선택", opts, key=f"{key_prefix}_landing_filter")
-    if sel != LANDING_ALL:
-        df = df[df["랜딩페이지"] == sel]
-    return df, sel
-
-def media_filter_ui(df, key_prefix):
-    """매체 필터 UI"""
-    if "매체" not in df.columns: return df, LANDING_ALL
-    opts = [LANDING_ALL] + sorted(df["매체"].dropna().unique().tolist())
-    sel = st.selectbox("매체 선택", opts, key=f"{key_prefix}_media_filter")
-    if sel != LANDING_ALL:
-        df = df[df["매체"] == sel]
-    return df, sel
 
 
 # ══════════════════════════════════════════════════════════════
@@ -513,7 +573,7 @@ def media_filter_ui(df, key_prefix):
 # ══════════════════════════════════════════════════════════════
 with st.sidebar:
     st.title("📊 BOJ 광고 대시보드")
-    page = st.radio("페이지", ["📝 코멘트 생성기", "📈 리포트 대시보드"],
+    page = st.radio("페이지", ["📝 코멘트 생성기", "📈 리포트 대시보드", "🔄 RAW 리포트 변환"],
                     label_visibility="collapsed")
     st.divider()
 
@@ -541,7 +601,6 @@ if page == "📝 코멘트 생성기":
     st.caption("최종 리포트 xlsx(Total_Raw 시트 포함)를 업로드하면 탑라인 멘트 + 랜딩별 특이사항을 자동 생성합니다.")
 
     uploaded = st.file_uploader("📂 최종 리포트 xlsx 업로드", type=["xlsx"])
-
     if not uploaded:
         st.info("👆 xlsx 파일을 업로드하세요.")
         with st.expander("💡 사용 방법"):
@@ -551,8 +610,7 @@ if page == "📝 코멘트 생성기":
 3. **코멘트 생성** 버튼 클릭
 4. 각 매체별 **전체 합산** + **랜딩별** 코멘트 확인 후 복사
 
-**랜딩 구분:** Total_Raw의 `랜딩페이지` 컬럼(AG열) 기준으로 자동 분리
-**생성 내용:** 탑라인 멘트 + 전일/전주 대비 + AI 특이사항(API Key 입력 시)
+**랜딩 구분:** Total_Raw의 `랜딩페이지` 컬럼 기준 자동 분리
             """)
         st.stop()
 
@@ -561,8 +619,6 @@ if page == "📝 코멘트 생성기":
             df_report = load_report_raw(io.BytesIO(uploaded.read()))
             avail = sorted(df_report["날짜"].dt.date.dropna().unique())
             latest_d, earliest_d = max(avail), min(avail)
-
-            # 랜딩 현황 표시
             landing_counts = df_report["랜딩페이지"].value_counts()
             landing_info = " | ".join([f"{k}: {v:,}행" for k,v in landing_counts.items()])
             st.success(f"✅ {len(df_report):,}행 | 날짜: {earliest_d} ~ {latest_d}")
@@ -589,28 +645,22 @@ if page == "📝 코멘트 생성기":
         if not selected_media:
             st.warning("매체를 하나 이상 선택하세요.")
             st.stop()
-
         target_dt   = datetime.combine(target_date, datetime.min.time())
         prev_day_dt = target_dt - timedelta(days=1)
         month_start = target_dt.replace(day=1)
         week_start  = target_dt - timedelta(days=target_dt.weekday())
         all_comments = []
         prog = st.progress(0)
-
         for idx, mk in enumerate(selected_media):
             df_m = filter_media(df_report, mk)
             if len(df_m) == 0:
                 st.warning(f"{mk}: 데이터 없음")
                 prog.progress((idx+1)/len(selected_media))
                 continue
-
-            render_media_comment(
-                mk, df_m, target_dt, prev_day_dt,
-                month_start, week_start, rtype, api_key,
-                notes.get(mk, ""), all_comments
-            )
+            render_media_comment(mk, df_m, target_dt, prev_day_dt,
+                                 month_start, week_start, rtype, api_key,
+                                 notes.get(mk,""), all_comments)
             prog.progress((idx+1)/len(selected_media))
-
         if all_comments:
             st.subheader("📋 전체 통합 (복사용)")
             st.text_area("전체", value="\n\n".join(all_comments), height=500, key="all_comments")
@@ -649,7 +699,7 @@ elif page == "📈 리포트 대시보드":
             else:
                 st.caption(f"⚪ {media} — 미업로드")
         st.divider()
-        if st.button("🗑️ 전체 초기화", use_container_width=True):
+        if st.button("🗑️ 전체 초기화", use_container_width=True, key="dash_reset"):
             st.session_state.media_data = {}
             st.session_state.media_warnings = {}
             st.rerun()
@@ -662,18 +712,20 @@ elif page == "📈 리포트 대시보드":
         with st.expander("📋 매체별 컬럼 매핑 현황"):
             rows = []
             for m,mapping in MEDIA_COL_MAP.items():
+                note = "✅ 전용 변환 로직" if m in TRANSFORM_MAP else ""
                 for sk,sn in STD_COLS.items():
                     cands = [c for c in mapping.get(sk,[]) if c]
-                    rows.append({"매체":m,"표준 컬럼":sn,"인식 가능한 RAW 컬럼명":" / ".join(cands) if cands else "❌"})
+                    rows.append({"매체":m,"표준 컬럼":sn,
+                                 "인식 가능한 RAW 컬럼명":" / ".join(cands) if cands else "❌",
+                                 "비고":note if sk=="date" else ""})
             st.dataframe(pd.DataFrame(rows), use_container_width=True, height=400, hide_index=True)
         st.stop()
 
-    all_dfs = list(st.session_state.media_data.values())
-    df_all  = pd.concat(all_dfs, ignore_index=True)
+    all_dfs      = list(st.session_state.media_data.values())
+    df_all       = pd.concat(all_dfs, ignore_index=True)
     loaded_media = list(st.session_state.media_data.keys())
-
-    tab_labels = ["📈 Sales Overview"] + [f"📺 {m}" for m in loaded_media] + ["⚙️ 컬럼 매핑"]
-    tabs = st.tabs(tab_labels)
+    tab_labels   = ["📈 Sales Overview"] + [f"📺 {m}" for m in loaded_media] + ["⚙️ 컬럼 매핑"]
+    tabs         = st.tabs(tab_labels)
 
     # ── Tab 0: Sales Overview ─────────────────────────────────
     with tabs[0]:
@@ -683,8 +735,6 @@ elif page == "📈 리포트 대시보드":
             st.warning("날짜 데이터가 없습니다.")
         else:
             min_d, max_d = vd.min().date(), vd.max().date()
-
-            # 상단 필터 바: 기간 + 매체 + 랜딩
             fc1,fc2,fc3,fc4 = st.columns([2,2,2,2])
             with fc1: sel_start = st.date_input("시작일", min_d, min_value=min_d, max_value=max_d, key="s_s")
             with fc2: sel_end   = st.date_input("종료일", max_d, min_value=min_d, max_value=max_d, key="s_e")
@@ -692,33 +742,28 @@ elif page == "📈 리포트 대시보드":
                 m_opts = [LANDING_ALL] + sorted(df_all["매체"].dropna().unique().tolist())
                 sel_m  = st.selectbox("매체", m_opts, key="ov_media")
             with fc4:
-                l_opts = [LANDING_ALL] + sorted(df_all["랜딩페이지"].dropna().unique().tolist())
-                l_opts = [l for l in l_opts if l not in ("미분류","nan","") or l == LANDING_ALL]
+                l_opts = [LANDING_ALL] + sorted([l for l in df_all["랜딩페이지"].dropna().unique()
+                                                 if l not in ("미분류","nan","")])
                 sel_l  = st.selectbox("랜딩", l_opts, key="ov_landing")
 
             df_f = df_all[(df_all["날짜"].dt.date >= sel_start) & (df_all["날짜"].dt.date <= sel_end)].copy()
-            if sel_m  != LANDING_ALL: df_f = df_f[df_f["매체"] == sel_m]
-            if sel_l  != LANDING_ALL: df_f = df_f[df_f["랜딩페이지"] == sel_l]
+            if sel_m != LANDING_ALL: df_f = df_f[df_f["매체"] == sel_m]
+            if sel_l != LANDING_ALL: df_f = df_f[df_f["랜딩페이지"] == sel_l]
 
-            # 전체 KPI
             section("▣ 전체 KPI")
             kpi_row(calc_kpis(df_f))
             st.divider()
 
-            # 월별
             section("▣ 월별 성과")
             df_f["월"] = df_f["날짜"].dt.to_period("M").astype(str)
             show_table(make_agg_table(df_f, ["월"]))
             st.divider()
 
-            # 매체 × 랜딩 × 월
             section("▣ 매체 × 랜딩 — 월별 성과")
-            df_f2 = df_f.copy()
-            df_f2["월"] = df_f2["날짜"].dt.to_period("M").astype(str)
+            df_f2 = df_f.copy(); df_f2["월"] = df_f2["날짜"].dt.to_period("M").astype(str)
             show_table(make_agg_table(df_f2, ["매체","랜딩페이지","월"]))
             st.divider()
 
-            # 매체 × 랜딩 × 주차
             section("▣ 매체 × 랜딩 — 주차별 성과")
             df_f3 = df_f.copy()
             df_f3["주차"]  = df_f3["날짜"].dt.to_period("W").apply(
@@ -731,10 +776,8 @@ elif page == "📈 리포트 대시보드":
             show_table(kpi_table(grp_w))
             st.divider()
 
-            # 매체 × 랜딩 × 일자
             section("▣ 매체 × 랜딩 — 일자별 성과")
-            df_f4 = df_f.copy()
-            df_f4["날짜str"] = df_f4["날짜"].dt.strftime("%Y-%m-%d")
+            df_f4 = df_f.copy(); df_f4["날짜str"] = df_f4["날짜"].dt.strftime("%Y-%m-%d")
             grp_d = df_f4.groupby(["날짜str","매체","랜딩페이지"]).agg(
                 비용=("비용","sum"), 노출=("노출","sum"), 클릭=("클릭","sum"),
                 구매=("구매","sum"), 매출액=("매출액","sum")
@@ -746,11 +789,9 @@ elif page == "📈 리포트 대시보드":
         with tabs[ti+1]:
             df_m  = st.session_state.media_data[media].copy()
             warns = st.session_state.media_warnings.get(media,[])
-
             st.subheader(f"{media} 성과 리포트")
             if warns: st.warning(f"⚠️ 미매핑 컬럼: {', '.join(warns)}")
 
-            # 기간 + 랜딩 필터
             vd2 = df_m["날짜"].dropna()
             if not vd2.empty:
                 mn,mx = vd2.min().date(), vd2.max().date()
@@ -762,49 +803,44 @@ elif page == "📈 리포트 대시보드":
                     land_opts = [LANDING_ALL] + sorted([l for l in df_mf["랜딩페이지"].unique()
                                                         if l not in ("미분류","nan","")])
                     sel_land = st.selectbox("랜딩 필터", land_opts, key=f"{media}_land")
-                df_mf_filtered = df_mf[df_mf["랜딩페이지"] == sel_land] if sel_land != LANDING_ALL else df_mf
+                df_mf_f = df_mf[df_mf["랜딩페이지"] == sel_land] if sel_land != LANDING_ALL else df_mf
             else:
-                df_mf = df_mf_filtered = df_m.copy()
+                df_mf = df_mf_f = df_m.copy()
                 sel_land = LANDING_ALL
 
-            kpi_row(calc_kpis(df_mf_filtered))
+            kpi_row(calc_kpis(df_mf_f))
             st.divider()
-
             it = st.tabs(["그룹별","소재별","주차별","일자별"])
 
             with it[0]:
                 section(f"▣ {media} — 그룹별 성과")
                 gc = "광고그룹명"
-                if gc in df_mf_filtered.columns and df_mf_filtered[gc].notna().any():
-                    # 랜딩 구분 포함 여부
-                    has_land = df_mf_filtered["랜딩페이지"].nunique() > 1 and sel_land == LANDING_ALL
-                    gcols = ([gc,"랜딩페이지"] if has_land else [gc])
-                    show_table(make_agg_table(df_mf_filtered, gcols))
+                if gc in df_mf_f.columns and df_mf_f[gc].notna().any():
+                    has_land = df_mf_f["랜딩페이지"].nunique() > 1 and sel_land == LANDING_ALL
+                    show_table(make_agg_table(df_mf_f, [gc,"랜딩페이지"] if has_land else [gc]))
                 else:
                     st.info("광고그룹명 컬럼이 매핑되지 않았습니다.")
 
             with it[1]:
                 section(f"▣ {media} — 소재별 성과")
                 ac = "광고명/소재명"
-                if ac in df_mf_filtered.columns and df_mf_filtered[ac].notna().any():
-                    has_land = df_mf_filtered["랜딩페이지"].nunique() > 1 and sel_land == LANDING_ALL
-                    acols = ([ac,"랜딩페이지"] if has_land else [ac])
-                    show_table(make_agg_table(df_mf_filtered, acols), height=400)
+                if ac in df_mf_f.columns and df_mf_f[ac].notna().any():
+                    has_land = df_mf_f["랜딩페이지"].nunique() > 1 and sel_land == LANDING_ALL
+                    show_table(make_agg_table(df_mf_f, [ac,"랜딩페이지"] if has_land else [ac]), height=400)
                 else:
                     st.info("소재명 컬럼이 매핑되지 않았습니다.")
 
             with it[2]:
                 section(f"▣ {media} — 주차별 성과")
-                if df_mf_filtered["날짜"].notna().any():
-                    df_tmp = df_mf_filtered.copy()
-                    df_tmp["주차"]  = df_tmp["날짜"].dt.to_period("W").apply(
+                if df_mf_f["날짜"].notna().any():
+                    df_tmp = df_mf_f.copy()
+                    df_tmp["주차"] = df_tmp["날짜"].dt.to_period("W").apply(
                         lambda p: f"{p.start_time.strftime('%m/%d')}~{p.end_time.strftime('%m/%d')}")
-                    df_tmp["_ws"]   = df_tmp["날짜"].dt.to_period("W").astype(str)
+                    df_tmp["_ws"] = df_tmp["날짜"].dt.to_period("W").astype(str)
                     has_land = df_tmp["랜딩페이지"].nunique() > 1 and sel_land == LANDING_ALL
-                    wcols = (["_ws","주차","랜딩페이지"] if has_land else ["_ws","주차"])
-                    g = df_tmp.groupby(wcols).agg(
-                        비용=("비용","sum"), 노출=("노출","sum"), 클릭=("클릭","sum"),
-                        구매=("구매","sum"), 매출액=("매출액","sum")
+                    wcols = ["_ws","주차","랜딩페이지"] if has_land else ["_ws","주차"]
+                    g = df_tmp.groupby(wcols).agg(비용=("비용","sum"), 노출=("노출","sum"),
+                        클릭=("클릭","sum"), 구매=("구매","sum"), 매출액=("매출액","sum")
                     ).reset_index().sort_values("_ws").drop(columns=["_ws"])
                     show_table(kpi_table(g))
                 else:
@@ -812,14 +848,13 @@ elif page == "📈 리포트 대시보드":
 
             with it[3]:
                 section(f"▣ {media} — 일자별 성과")
-                if df_mf_filtered["날짜"].notna().any():
-                    df_tmp = df_mf_filtered.copy()
+                if df_mf_f["날짜"].notna().any():
+                    df_tmp = df_mf_f.copy()
                     df_tmp["날짜str"] = df_tmp["날짜"].dt.strftime("%Y-%m-%d")
                     has_land = df_tmp["랜딩페이지"].nunique() > 1 and sel_land == LANDING_ALL
-                    dcols = (["날짜str","랜딩페이지"] if has_land else ["날짜str"])
-                    g = df_tmp.groupby(dcols).agg(
-                        비용=("비용","sum"), 노출=("노출","sum"), 클릭=("클릭","sum"),
-                        구매=("구매","sum"), 매출액=("매출액","sum")
+                    dcols = ["날짜str","랜딩페이지"] if has_land else ["날짜str"]
+                    g = df_tmp.groupby(dcols).agg(비용=("비용","sum"), 노출=("노출","sum"),
+                        클릭=("클릭","sum"), 구매=("구매","sum"), 매출액=("매출액","sum")
                     ).reset_index().rename(columns={"날짜str":"날짜"})
                     show_table(kpi_table(g), height=400)
                 else:
@@ -828,50 +863,52 @@ elif page == "📈 리포트 대시보드":
     # ── Tab 마지막: 컬럼 매핑 설정 ──────────────────────────
     with tabs[-1]:
         st.subheader("⚙️ 컬럼 매핑 확인 및 수동 설정")
-        st.markdown("RAW 파일 컬럼명이 자동 인식되지 않을 때 여기서 직접 매핑합니다.")
-
         if not st.session_state.media_data:
             st.info("먼저 사이드바에서 RAW 파일을 업로드하세요.")
         else:
             tgt    = st.selectbox("수정할 매체", loaded_media, key="map_media")
             df_s   = st.session_state.media_data[tgt]
             w_cols = st.session_state.media_warnings.get(tgt,[])
-            st.markdown(f"**미매핑 컬럼:** {', '.join(w_cols) if w_cols else '없음 (정상)'}")
+            if tgt in TRANSFORM_MAP:
+                st.success(f"✅ {tgt}는 전용 변환 로직이 적용됩니다. 수동 매핑 불필요.")
+            else:
+                st.markdown(f"**미매핑 컬럼:** {', '.join(w_cols) if w_cols else '없음 (정상)'}")
             st.dataframe(df_s.head(5), use_container_width=True, hide_index=True)
 
-            st.divider()
-            re_up = st.file_uploader(f"{tgt} 재업로드", type=["xlsx","csv"], key=f"remap_{tgt}")
-            if re_up:
-                df_re = (pd.read_csv(re_up, encoding="utf-8-sig")
-                         if re_up.name.endswith(".csv") else pd.read_excel(re_up, sheet_name=0))
-                raw_cols = ["(없음)"] + df_re.columns.tolist()
-                st.write("RAW 컬럼:", df_re.columns.tolist())
-                manual_map = {}
-                cp = st.columns(2)
-                for i,(sk,sn) in enumerate(STD_COLS.items()):
-                    with cp[i%2]:
-                        sel = st.selectbox(sn, raw_cols, key=f"man_{tgt}_{sk}")
-                        if sel != "(없음)": manual_map[sk] = sel
-                if st.button("✅ 매핑 적용", type="primary"):
-                    result, miss2 = {}, []
-                    for sk,sn in STD_COLS.items():
-                        if sk in manual_map:
-                            result[sn] = df_re[manual_map[sk]]
-                        else:
-                            result[sn] = pd.Series([None]*len(df_re))
-                            if sk not in ["cart","ad","landing"]: miss2.append(sn)
-                    df_new = pd.DataFrame(result)
-                    df_new["날짜"] = pd.to_datetime(df_new["날짜"], errors="coerce")
-                    for col in ["비용","노출","클릭","구매","매출액","장바구니"]:
-                        df_new[col] = pd.to_numeric(
-                            df_new[col].astype(str).str.replace(",","").str.replace("₩","").str.strip(),
-                            errors="coerce").fillna(0)
-                    df_new["랜딩페이지"] = df_new["랜딩페이지"].fillna("미분류").astype(str).str.strip()
-                    df_new["매체"] = tgt
-                    st.session_state.media_data[tgt]    = df_new
-                    st.session_state.media_warnings[tgt] = miss2
-                    st.success("✅ 적용 완료!")
-                    st.rerun()
+            if tgt not in TRANSFORM_MAP:
+                st.divider()
+                re_up = st.file_uploader(f"{tgt} 재업로드", type=["xlsx","csv"], key=f"remap_{tgt}")
+                if re_up:
+                    df_re = (pd.read_csv(re_up, encoding="utf-8-sig")
+                             if re_up.name.endswith(".csv") else pd.read_excel(re_up, sheet_name=0))
+                    raw_cols = ["(없음)"] + df_re.columns.tolist()
+                    st.write("RAW 컬럼:", df_re.columns.tolist())
+                    manual_map = {}
+                    cp = st.columns(2)
+                    for i,(sk,sn) in enumerate(STD_COLS.items()):
+                        with cp[i%2]:
+                            sel = st.selectbox(sn, raw_cols, key=f"man_{tgt}_{sk}")
+                            if sel != "(없음)": manual_map[sk] = sel
+                    if st.button("✅ 매핑 적용", type="primary"):
+                        result, miss2 = {}, []
+                        for sk,sn in STD_COLS.items():
+                            if sk in manual_map:
+                                result[sn] = df_re[manual_map[sk]]
+                            else:
+                                result[sn] = pd.Series([None]*len(df_re))
+                                if sk not in ["cart","ad","landing"]: miss2.append(sn)
+                        df_new = pd.DataFrame(result)
+                        df_new["날짜"] = pd.to_datetime(df_new["날짜"], errors="coerce")
+                        for col in ["비용","노출","클릭","구매","매출액","장바구니"]:
+                            df_new[col] = pd.to_numeric(
+                                df_new[col].astype(str).str.replace(",","").str.replace("₩","").str.strip(),
+                                errors="coerce").fillna(0)
+                        df_new["랜딩페이지"] = df_new["랜딩페이지"].fillna("미분류").astype(str).str.strip()
+                        df_new["매체"] = tgt
+                        st.session_state.media_data[tgt]    = df_new
+                        st.session_state.media_warnings[tgt] = miss2
+                        st.success("✅ 적용 완료!")
+                        st.rerun()
 
         st.divider()
         st.markdown("**전체 컬럼 매핑 현황**")
@@ -879,5 +916,160 @@ elif page == "📈 리포트 대시보드":
         for m,mapping in MEDIA_COL_MAP.items():
             for sk,sn in STD_COLS.items():
                 cands = [c for c in mapping.get(sk,[]) if c]
-                mr.append({"매체":m,"표준 컬럼":sn,"인식 가능한 컬럼명":" / ".join(cands) if cands else "❌"})
+                mr.append({"매체":m,"표준 컬럼":sn,
+                           "인식 가능한 컬럼명":" / ".join(cands) if cands else "❌",
+                           "변환방식":"전용 함수" if (m in TRANSFORM_MAP and sk=="date") else ""})
         st.dataframe(pd.DataFrame(mr), use_container_width=True, height=400, hide_index=True)
+
+
+# ══════════════════════════════════════════════════════════════
+# PAGE 3 — RAW 리포트 변환 (ADVoost 등 매체별 RAW → 표준 xlsx)
+# ══════════════════════════════════════════════════════════════
+elif page == "🔄 RAW 리포트 변환":
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    st.title("🔄 RAW 리포트 변환")
+    st.caption("매체별 RAW 파일을 업로드하면 표준 리포트 형식(xlsx)으로 변환해 다운로드할 수 있습니다.")
+
+    with st.sidebar:
+        st.subheader("🔄 변환 설정")
+        conv_media = st.selectbox("매체 선택", list(TRANSFORM_MAP.keys()), key="conv_media")
+        st.caption(f"현재 변환 가능 매체: {', '.join(TRANSFORM_MAP.keys())}")
+        st.info("다른 매체는 순차적으로 추가 예정입니다.")
+
+    st.subheader(f"{conv_media} RAW → 표준 리포트")
+
+    # 변환 규칙 안내
+    with st.expander("📋 변환 규칙 확인", expanded=False):
+        if conv_media == "Naver ADVoost":
+            st.markdown("""
+| RAW 컬럼 | 표준 컬럼 | 처리 방식 |
+|---|---|---|
+| 기간 | 날짜 | `2026.03.28.` → `2026-03-28` |
+| 캠페인 이름 | 캠페인명 | 그대로 |
+| 애셋 그룹 이름 | 광고그룹명 | 그대로 |
+| (없음) | 광고명 | `Asset_all_items` 고정 |
+| 총 비용 | 비용 | ÷ 1.1 (VAT 제외) |
+| 노출 | 노출 | 그대로 |
+| 클릭 | 클릭 | 그대로 |
+| 구매완료수 | 구매 | 그대로 |
+| 구매완료 전환 매출액 | 매출액 | 그대로 |
+| 장바구니 담기수 | 장바구니 | 그대로 |
+| — | 도달·참여·팔로우·동영상 조회 | 빈 칸 |
+            """)
+
+    conv_file = st.file_uploader(f"📂 {conv_media} RAW 파일 업로드", type=["csv","xlsx"],
+                                  key="conv_upload")
+
+    if conv_file:
+        try:
+            df_raw = (pd.read_csv(conv_file, encoding="utf-8-sig")
+                      if conv_file.name.endswith(".csv") else pd.read_excel(conv_file, sheet_name=0))
+
+            st.caption(f"원본 컬럼: {df_raw.columns.tolist()}")
+
+            # 변환 실행
+            transform_fn = TRANSFORM_MAP[conv_media]
+            df_converted = transform_fn(df_raw)
+
+            st.success(f"✅ 변환 완료 — {len(df_converted)}행")
+
+            # 미리보기
+            section("▣ 변환 결과 미리보기")
+            st.dataframe(df_converted, use_container_width=True, height=220, hide_index=True)
+
+            # KPI 요약
+            section("▣ 기간별 KPI 요약")
+            df_kpi = df_converted.copy()
+            df_kpi["날짜str"] = pd.to_datetime(df_kpi["날짜"], errors="coerce").dt.strftime("%Y-%m-%d")
+            grp = df_kpi.groupby("날짜str").agg(
+                비용=("비용","sum"), 노출=("노출","sum"), 클릭=("클릭","sum"),
+                구매=("구매","sum"), 매출액=("매출액","sum"), 장바구니=("장바구니","sum")
+            ).reset_index().rename(columns={"날짜str":"날짜"})
+
+            rows_kpi = []
+            for _, r in grp.iterrows():
+                sp=r["비용"]; cl=r["클릭"]; pu=r["구매"]; rv=r["매출액"]
+                rows_kpi.append({
+                    "날짜":  r["날짜"],
+                    "비용":  f"{sp:,.0f}",
+                    "노출":  f"{int(r['노출']):,}",
+                    "클릭":  f"{int(cl):,}",
+                    "CTR":   f"{cl/r['노출']*100:.2f}%" if r["노출"] else "-",
+                    "구매":  f"{int(pu):,}",
+                    "CVR":   f"{pu/cl*100:.2f}%" if cl else "-",
+                    "매출액": f"{int(rv):,}",
+                    "ROAS":  f"{rv/sp*100:.0f}%" if sp else "-",
+                    "장바구니": f"{int(r['장바구니']):,}",
+                })
+            st.dataframe(pd.DataFrame(rows_kpi), use_container_width=True, hide_index=True)
+
+            # xlsx 생성 및 다운로드
+            section("▣ xlsx 다운로드")
+
+            def build_xlsx(df_out):
+                HEADER_FILL = PatternFill("solid", fgColor="1F4E79")
+                HEADER_FONT = Font(name="Arial", bold=True, color="FFFFFF", size=10)
+                DATA_FONT   = Font(name="Arial", size=10)
+                CENTER      = Alignment(horizontal="center", vertical="center")
+                LEFT        = Alignment(horizontal="left",   vertical="center")
+                RIGHT       = Alignment(horizontal="right",  vertical="center")
+                THIN        = Side(style="thin", color="D0D0D0")
+                BORDER      = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
+                ALT_FILL    = PatternFill("solid", fgColor="EBF3FB")
+                NUM_FMT     = {"비용":"#,##0.00","노출":"#,##0","클릭":"#,##0",
+                               "구매":"#,##0","매출액":"#,##0","장바구니":"#,##0"}
+                COL_W       = {"날짜":13,"캠페인명":22,"광고그룹명":20,"광고명":20,
+                               "비용":14,"노출":12,"클릭":10,"구매":10,"매출액":14,
+                               "장바구니":12,"도달":10,"참여":10,"팔로우":10,"동영상 조회":13}
+                wb = Workbook(); ws = wb.active; ws.title = f"{conv_media}_RAW"
+                for ci, col in enumerate(REPORT_COLS, 1):
+                    cell = ws.cell(row=1, column=ci, value=col)
+                    cell.font=HEADER_FONT; cell.fill=HEADER_FILL
+                    cell.alignment=CENTER; cell.border=BORDER
+                for ri, row in df_out.iterrows():
+                    fill = ALT_FILL if ri % 2 == 1 else None
+                    for ci, col in enumerate(REPORT_COLS, 1):
+                        val = row.get(col)
+                        if pd.isna(val) if isinstance(val, float) else val is None:
+                            val = None
+                        cell = ws.cell(row=ri+2, column=ci, value=val)
+                        cell.font=DATA_FONT; cell.border=BORDER
+                        if fill: cell.fill=fill
+                        cell.alignment = RIGHT if col in NUM_FMT else (CENTER if col=="날짜" else LEFT)
+                        if col in NUM_FMT and val is not None:
+                            cell.number_format = NUM_FMT[col]
+                for ci, col in enumerate(REPORT_COLS, 1):
+                    ws.column_dimensions[get_column_letter(ci)].width = COL_W.get(col, 12)
+                ws.row_dimensions[1].height = 22
+                for ri in range(2, len(df_out)+2): ws.row_dimensions[ri].height = 18
+                ws.freeze_panes = "A2"
+                buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+                return buf
+
+            buf = build_xlsx(df_converted)
+            fname = f"{conv_media}_report_{datetime.today().strftime('%Y%m%d')}.xlsx"
+            st.download_button(
+                label="⬇️ xlsx 다운로드",
+                data=buf,
+                file_name=fname,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                use_container_width=True,
+            )
+
+        except Exception as e:
+            st.error(f"변환 오류: {e}")
+            import traceback
+            st.code(traceback.format_exc())
+    else:
+        st.info(f"👆 {conv_media} RAW 파일(csv 또는 xlsx)을 업로드하세요.")
+        st.markdown("""
+**지원 파일 형식:**
+- Naver ADVoost: 네이버 성과형 디스플레이 광고 → 애셋 그룹 보고서 (csv)
+
+**추후 추가 예정:** Meta, TikTok, Kakao, Naver SSA/BSA, Criteo, Buzzvil
+        """)
