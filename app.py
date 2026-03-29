@@ -89,18 +89,29 @@ def _to_float(v, default=0.0):
     except:
         return default
 
-def _parse_date_dot(s):
-    """'2026.03.28.' → '2026-03-28'"""
+def _parse_advoost_date(s):
+    """
+    ADVoost '기간' 컬럼 → 날짜 파싱
+    - '2026.03.28.'  → 2026-03-28
+    - '2026-03-28'   → 2026-03-28 (이미 표준 형식)
+    - '2026/03/28'   → 2026-03-28
+    - '2026.3.28'    → 2026-03-28
+    - None / NaN     → NaT
+    """
+    if s is None or (isinstance(s, float) and pd.isna(s)):
+        return pd.NaT
     s = str(s).strip().rstrip(".")
-    parts = s.split(".")
+    if len(s) == 10 and s[4] == "-":
+        return pd.to_datetime(s, errors="coerce")
+    parts = s.replace("/", ".").split(".")
     if len(parts) == 3:
-        return f"{parts[0]}-{parts[1]}-{parts[2]}"
-    return s
+        return pd.to_datetime(f"{parts[0]}-{parts[1].zfill(2)}-{parts[2].zfill(2)}", errors="coerce")
+    return pd.to_datetime(s, errors="coerce")
 
 def transform_advoost(df_raw):
     """
     Naver ADVoost RAW → 표준 리포트 컬럼
-    - 날짜   : 기간 ('2026.03.28.' 형식)
+    - 날짜   : 기간 → 날짜 (다양한 형식 자동 파싱)
     - 캠페인명: 캠페인 이름
     - 광고그룹명: 애셋 그룹 이름
     - 광고명  : 'Asset_all_items' 고정
@@ -115,7 +126,7 @@ def transform_advoost(df_raw):
     rows = []
     for _, r in df_raw.iterrows():
         rows.append({
-            "날짜":       _parse_date_dot(r.get("기간", "")),
+            "날짜":       _parse_advoost_date(r.get("기간")),   # 기간 = 날짜
             "캠페인명":   str(r.get("캠페인 이름", "")).strip(),
             "광고그룹명": str(r.get("애셋 그룹 이름", "")).strip(),
             "광고명":     "Asset_all_items",
@@ -131,6 +142,7 @@ def transform_advoost(df_raw):
             "동영상 조회": None,
         })
     df = pd.DataFrame(rows, columns=REPORT_COLS)
+    # 날짜가 이미 Timestamp이므로 astype만 보장
     df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
     return df.sort_values("날짜", ascending=False).reset_index(drop=True)
 
