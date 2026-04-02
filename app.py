@@ -722,8 +722,9 @@ def make_agg_table(df, group_cols):
 with st.sidebar:
     st.title("📊 BOJ 광고 대시보드")
     page = st.radio("페이지",
-                    ["📝 코멘트 생성기", "📈 리포트 대시보드",
-                     "🔄 RAW 리포트 변환", "🧠 코멘트 히스토리"],
+                    ["📝 코멘트 생성기", "📊 Sales 리포트",
+                     "📈 리포트 대시보드", "🔄 RAW 리포트 변환",
+                     "🧠 코멘트 히스토리"],
                     label_visibility="collapsed")
     st.divider()
 
@@ -815,6 +816,458 @@ if page == "📝 코멘트 생성기":
             st.subheader("📋 전체 통합 (복사용)")
             st.text_area("전체", value="\n\n".join(all_comments), height=500, key="all_comments")
         prog.empty()
+
+
+# ══════════════════════════════════════════════════════════════
+# PAGE 2 — Sales 리포트 (이미지 리포트 구조 그대로 구현)
+# ══════════════════════════════════════════════════════════════
+elif page == "📊 Sales 리포트":
+
+    import json
+
+    # ── 주차 라벨 헬퍼 ────────────────────────────────────────
+    def week_label(dt):
+        m = dt.month
+        # 해당 월의 첫째 날
+        first = dt.replace(day=1)
+        week_num = (dt.day + first.weekday()) // 7 + 1
+        return f"{m}월{week_num}주차"
+
+    # ── 숫자 포맷 헬퍼 ────────────────────────────────────────
+    def f_int(v):
+        try: return f"{int(round(float(v))):,}"
+        except: return "-"
+    def f_pct(v, dec=2):
+        try: return f"{float(v):.{dec}f}%"
+        except: return "-"
+    def f_won(v):
+        try:
+            v = int(round(float(v)))
+            if abs(v) >= 10_000: return f"{v/10_000:.0f}만"
+            return f"{v:,}"
+        except: return "-"
+
+    # ── KPI 행 계산 ───────────────────────────────────────────
+    def calc_row(df):
+        sp = df["비용"].sum(); im = df["노출"].sum()
+        cl = df["클릭"].sum(); pu = df["구매"].sum(); rv = df["매출액"].sum()
+        return {
+            "Spend": sp, "Imp": im, "Click": cl,
+            "CTR":  cl/im*100  if im else 0,
+            "CPC":  sp/cl      if cl else 0,
+            "CPM":  sp/im*1000 if im else 0,
+            "구매 수": pu,
+            "CPA (구매)": sp/pu if pu else 0,
+            "CVR (구매)": pu/cl*100 if cl else 0,
+            "매출": rv,
+            "AOV":  rv/pu if pu else 0,
+            "ROAS": rv/sp*100 if sp else 0,
+        }
+
+    def fmt_row(row):
+        """계산된 KPI dict → 표시용 dict"""
+        return {
+            "Spend":      f_int(row["Spend"]),
+            "Imp":        f_int(row["Imp"]),
+            "Click":      f_int(row["Click"]),
+            "CTR":        f_pct(row["CTR"]),
+            "CPC":        f_int(row["CPC"]),
+            "CPM":        f_int(row["CPM"]),
+            "구매 수":    f_int(row["구매 수"]),
+            "CPA (구매)": f_int(row["CPA (구매)"]),
+            "CVR (구매)": f_pct(row["CVR (구매)"]),
+            "매출":       f_int(row["매출"]),
+            "AOV":        f_int(row["AOV"]),
+            "ROAS":       f_pct(row["ROAS"], 0) + "%",
+        }
+
+    KPI_COLS = ["Spend","Imp","Click","CTR","CPC","CPM","구매 수","CPA (구매)","CVR (구매)","매출","AOV","ROAS"]
+
+    def make_display_df(rows_dict):
+        """
+        rows_dict: {row_label: raw_kpi_dict}
+        반환: 표시용 DataFrame (Campaign 컬럼 + KPI 컬럼)
+        """
+        records = []
+        for label, kpi in rows_dict.items():
+            r = {"Campaign": label}
+            r.update(fmt_row(kpi))
+            records.append(r)
+        return pd.DataFrame(records)
+
+    def highlight_total(df):
+        """Total 행 강조 스타일"""
+        def style_row(row):
+            if row.name == len(df)-1 and df.iloc[-1]["Campaign"] in ("Total","total"):
+                return ["font-weight:bold; background:#1F4E79; color:white"] * len(row)
+            return [""] * len(row)
+        return df.style.apply(style_row, axis=1)
+
+    # ── 사이드바: 데이터 소스 선택 & Plan 입력 ────────────────
+    with st.sidebar:
+        st.subheader("📊 데이터 소스")
+        data_src = st.radio("데이터 소스", ["🔄 RAW 변환 데이터", "📂 통합 리포트 xlsx"],
+                            key="sales_src", label_visibility="collapsed")
+
+        if data_src == "📂 통합 리포트 xlsx":
+            xlsx_up = st.file_uploader("통합 리포트 xlsx", type=["xlsx"], key="sales_xlsx")
+        st.divider()
+
+        st.subheader("✏️ Plan / E.Result 입력")
+        st.caption("수기 입력 데이터 (RAW에 없는 계획·예상값)")
+
+        plan_spend  = st.number_input("Plan Spend (원)", value=0, step=1000000, format="%d", key="plan_sp")
+        plan_pur    = st.number_input("Plan 구매 수",    value=0, step=100,     format="%d", key="plan_pu")
+        plan_rev    = st.number_input("Plan 매출 (원)",  value=0, step=1000000, format="%d", key="plan_rv")
+        plan_imp    = st.number_input("Plan Imp",        value=0, step=100000,  format="%d", key="plan_im")
+        plan_click  = st.number_input("Plan Click",      value=0, step=1000,    format="%d", key="plan_cl")
+        er_spend    = st.number_input("E.Result Spend",  value=0, step=1000000, format="%d", key="er_sp")
+        er_pur      = st.number_input("E.Result 구매",   value=0, step=100,     format="%d", key="er_pu")
+        er_rev      = st.number_input("E.Result 매출",   value=0, step=1000000, format="%d", key="er_rv")
+        er_imp      = st.number_input("E.Result Imp",    value=0, step=100000,  format="%d", key="er_im")
+        er_click    = st.number_input("E.Result Click",  value=0, step=1000,    format="%d", key="er_cl")
+
+        st.divider()
+        st.subheader("📺 매체별 MTD 예산")
+        st.caption("예산 수기 입력 후 아래 표에 반영됩니다.")
+        mtd_budgets = {}
+        mtd_media_list = ["Buzzvil","Criteo","Kakao Biz-Board","Kakao Catalog",
+                          "Meta","Naver ADVoost","Naver BSA","Naver SSA","TikTok"]
+        for m in mtd_media_list:
+            mtd_budgets[m] = st.number_input(f"{m} 예산", value=0, step=100000,
+                                              format="%d", key=f"mtd_{m}")
+
+    # ── 데이터 로드 ──────────────────────────────────────────
+    df_all = None
+
+    if data_src == "🔄 RAW 변환 데이터":
+        if st.session_state.converted_reports:
+            dfs = []
+            for m, df_c in st.session_state.converted_reports.items():
+                df_c2 = df_c.copy(); df_c2["매체"] = m
+                dfs.append(df_c2)
+            df_all = pd.concat(dfs, ignore_index=True)
+            df_all["날짜"] = pd.to_datetime(df_all["날짜"], errors="coerce")
+            for c in ["비용","노출","클릭","구매","매출액"]:
+                df_all[c] = pd.to_numeric(df_all[c], errors="coerce").fillna(0)
+        else:
+            st.info("👈 먼저 '🔄 RAW 리포트 변환' 페이지에서 매체별 RAW 파일을 업로드하세요.")
+            st.stop()
+    else:
+        if "xlsx_up" not in dir() or xlsx_up is None:
+            st.info("👈 통합 리포트 xlsx를 업로드하세요.")
+            st.stop()
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(xlsx_up.read()), data_only=True, read_only=True)
+            ws = wb["Total_Raw"]
+            rows_raw, headers = [], None
+            for row in ws.iter_rows(values_only=True):
+                if headers is None: headers = list(row); continue
+                if row[0] is None: continue
+                rows_raw.append(row)
+            wb.close()
+            df_all = pd.DataFrame(rows_raw, columns=headers)
+            df_all["날짜"] = pd.to_datetime(df_all["날짜"], errors="coerce")
+            for c in ["비용","노출","클릭","구매","매출액"]:
+                df_all[c] = pd.to_numeric(df_all[c], errors="coerce").fillna(0)
+            if "매체" not in df_all.columns and "상품(지면)" in df_all.columns:
+                df_all["매체"] = df_all["상품(지면)"]
+        except Exception as e:
+            st.error(f"파일 로드 실패: {e}")
+            st.stop()
+
+    if df_all is None or df_all.empty:
+        st.warning("데이터가 없습니다.")
+        st.stop()
+
+    # ── 기간 필터 ─────────────────────────────────────────────
+    st.title("📊 Sales Campaign Report")
+    vd = df_all["날짜"].dropna()
+    min_d, max_d = vd.min().date(), vd.max().date()
+
+    fc1, fc2, _ = st.columns([2,2,4])
+    with fc1: sel_s = st.date_input("시작일", min_d, min_value=min_d, max_value=max_d, key="rp_s")
+    with fc2: sel_e = st.date_input("종료일", max_d, min_value=min_d, max_value=max_d, key="rp_e")
+
+    df_f = df_all[(df_all["날짜"].dt.date >= sel_s) & (df_all["날짜"].dt.date <= sel_e)].copy()
+
+    # ── 랜딩 구분 ─────────────────────────────────────────────
+    # converted_reports 기반이면 랜딩페이지 컬럼 없을 수 있음 → 매체로 추정
+    NAVER_LANDING   = ["네이버 브랜드스토어"]
+    OLIVEYOUNG_LANDING = ["올리브영"]
+    KAKAO_LANDING   = ["카카오톡 스토어", "카카오톡 채널", "카카오톡 선물하기"]
+
+    if "랜딩페이지" in df_f.columns:
+        df_naver = df_f[df_f["랜딩페이지"].isin(NAVER_LANDING)]
+        df_olive = df_f[df_f["랜딩페이지"].isin(OLIVEYOUNG_LANDING)]
+        df_kakao = df_f[df_f["랜딩페이지"].isin(KAKAO_LANDING)]
+    else:
+        # 매체명으로 랜딩 추정
+        naver_media = ["Naver ADVoost","Naver BSA","Naver SSA"]
+        kakao_media = ["Kakao","Kakao Biz-Board","Kakao Catalog","Kakao Display"]
+        df_naver = df_f[df_f["매체"].isin(naver_media)] if "매체" in df_f.columns else df_f.iloc[0:0]
+        df_kakao = df_f[df_f["매체"].isin(kakao_media)] if "매체" in df_f.columns else df_f.iloc[0:0]
+        df_olive = df_f[~df_f["매체"].isin(naver_media + kakao_media)] if "매체" in df_f.columns else df_f
+
+    # ════════════════════════════════════════════════════════
+    # 1. Sales Campaign Overview — 월별
+    # ════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### ▣ Sales Campaign Overview")
+
+    df_f["월"] = df_f["날짜"].dt.to_period("M").astype(str)
+    months = sorted(df_f["월"].unique())
+
+    month_rows = {}
+    for m in months:
+        month_rows[m] = calc_row(df_f[df_f["월"] == m])
+    month_rows["Total"] = calc_row(df_f)
+
+    df_sales_ov = make_display_df(month_rows).rename(columns={"Campaign":"Campaign"})
+    st.dataframe(df_sales_ov, use_container_width=True, hide_index=True)
+
+    # ════════════════════════════════════════════════════════
+    # 2. Ongoing Campaign Overview — 랜딩별
+    # ════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### ▣ Ongoing Campaign Overview")
+
+    ongoing_rows = {}
+    if not df_naver.empty: ongoing_rows["Naver"] = calc_row(df_naver)
+    if not df_olive.empty: ongoing_rows["OliveYoung"] = calc_row(df_olive)
+    if not df_kakao.empty: ongoing_rows["Kakao"] = calc_row(df_kakao)
+    ongoing_rows["Total"] = calc_row(df_f)
+
+    st.dataframe(make_display_df(ongoing_rows), use_container_width=True, hide_index=True)
+
+    # ════════════════════════════════════════════════════════
+    # 3. Plan / E.Result
+    # ════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### ▣ Plan / E.Result")
+
+    actual = calc_row(df_f)
+
+    # Plan / E.Result 입력값
+    plan_kpi = {
+        "Spend": plan_spend, "Imp": plan_imp, "Click": plan_click,
+        "CTR": plan_click/plan_imp*100 if plan_imp else 0,
+        "CPC": plan_spend/plan_click if plan_click else 0,
+        "CPM": plan_spend/plan_imp*1000 if plan_imp else 0,
+        "구매 수": plan_pur,
+        "CPA (구매)": plan_spend/plan_pur if plan_pur else 0,
+        "CVR (구매)": plan_pur/plan_click*100 if plan_click else 0,
+        "매출": plan_rev,
+        "AOV": plan_rev/plan_pur if plan_pur else 0,
+        "ROAS": plan_rev/plan_spend*100 if plan_spend else 0,
+    }
+    er_kpi = {
+        "Spend": er_spend, "Imp": er_imp, "Click": er_click,
+        "CTR": er_click/er_imp*100 if er_imp else 0,
+        "CPC": er_spend/er_click if er_click else 0,
+        "CPM": er_spend/er_imp*1000 if er_imp else 0,
+        "구매 수": er_pur,
+        "CPA (구매)": er_spend/er_pur if er_pur else 0,
+        "CVR (구매)": er_pur/er_click*100 if er_click else 0,
+        "매출": er_rev,
+        "AOV": er_rev/er_pur if er_pur else 0,
+        "ROAS": er_rev/er_spend*100 if er_spend else 0,
+    }
+    # Comparison (실적/plan - 1)
+    def comp_val(a, p):
+        try:
+            r = (float(a) / float(p) - 1) * 100
+            return f"{r:+.0f}%"
+        except: return "-"
+
+    plan_row = {"Plan / E.Result": "Plan"}; plan_row.update(fmt_row(plan_kpi))
+    er_row   = {"Plan / E.Result": "E.Result"}; er_row.update(fmt_row(er_kpi))
+
+    # Comparison row (actual vs plan)
+    comp_row = {"Plan / E.Result": "Comparison"}
+    for k in KPI_COLS:
+        comp_row[k] = comp_val(actual.get(k.replace(" 수","").replace("(구매)","").strip(),0)
+                                if k not in ["구매 수","CPA (구매)","CVR (구매)"] else actual.get(k,0),
+                                plan_kpi.get(k,0))
+
+    df_plan = pd.DataFrame([plan_row, er_row, comp_row])
+    st.dataframe(df_plan, use_container_width=True, hide_index=True)
+    if plan_spend == 0 and er_spend == 0:
+        st.caption("💡 사이드바에서 Plan / E.Result 수치를 입력하면 자동 계산됩니다.")
+
+    # ════════════════════════════════════════════════════════
+    # 4. 매체별 MTD & 예상 마감 효율
+    # ════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### ▣ 매체 별 MTD & 예상 마감 효율")
+
+    mtd_rows = []
+    if "매체" in df_f.columns:
+        for m in mtd_media_list:
+            df_m = df_f[df_f["매체"] == m]
+            k = calc_row(df_m) if not df_m.empty else {kk:0 for kk in ["Spend","Imp","Click","구매 수","CPA (구매)","CVR (구매)","매출","AOV","ROAS","CTR","CPC","CPM"]}
+            r = {"Media": m}
+            r.update(fmt_row(k))
+            r["예산"] = f_int(mtd_budgets.get(m, 0))
+            mtd_rows.append(r)
+
+        # E.Result 합계 행
+        k_total = calc_row(df_f)
+        total_r = {"Media": "E.Result"}
+        total_r.update(fmt_row(k_total))
+        total_r["예산"] = f_int(er_spend)
+        mtd_rows.append(total_r)
+
+    if mtd_rows:
+        df_mtd = pd.DataFrame(mtd_rows)
+        cols_order = ["Media","예산"] + [c for c in df_mtd.columns if c not in ["Media","예산"]]
+        st.dataframe(df_mtd[cols_order], use_container_width=True, hide_index=True)
+    st.caption("💡 매체별 예산은 사이드바에서 입력하세요.")
+
+    # ════════════════════════════════════════════════════════
+    # 5. 매체별 성과 (월별 합산)
+    # ════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### ▣ 매체 별 성과")
+
+    if "매체" in df_f.columns:
+        media_rows = {}
+        for m in sorted(df_f["매체"].unique()):
+            media_rows[m] = calc_row(df_f[df_f["매체"] == m])
+        media_rows["Total"] = calc_row(df_f)
+        df_media_perf = make_display_df(media_rows).rename(columns={"Campaign":"Media"})
+        st.dataframe(df_media_perf, use_container_width=True, hide_index=True)
+    else:
+        st.info("매체 컬럼이 없습니다.")
+
+    # ════════════════════════════════════════════════════════
+    # 6. 주차별 성과 + 매출/ROAS 차트
+    # ════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### ▣ 주차 별 성과")
+
+    df_f["주차"] = df_f["날짜"].apply(lambda d: week_label(d) if pd.notna(d) else "")
+    df_f["주차정렬"] = df_f["날짜"].dt.to_period("W").astype(str)
+    week_rows = {}
+    for ws_sort, ws_label in df_f.groupby("주차정렬")["주차"].first().items():
+        grp = df_f[df_f["주차정렬"] == ws_sort]
+        week_rows[ws_label] = calc_row(grp)
+    week_rows["Total"] = calc_row(df_f)
+    df_week_perf = make_display_df(week_rows).rename(columns={"Campaign":"Week"})
+    st.dataframe(df_week_perf, use_container_width=True, hide_index=True)
+
+    # 매출/ROAS 일자별 차트 (이미지 2~3번 하단 차트)
+    st.markdown("##### 매출 & ROAS 추이")
+    try:
+        df_daily_chart = df_f.groupby(df_f["날짜"].dt.date).agg(
+            매출액=("매출액","sum"), 비용=("비용","sum")
+        ).reset_index()
+        df_daily_chart.columns = ["날짜","매출액","비용"]
+        df_daily_chart["ROAS"] = (df_daily_chart["매출액"] / df_daily_chart["비용"] * 100).round(1)
+        df_daily_chart["날짜"] = df_daily_chart["날짜"].astype(str)
+
+        import json as _json
+        chart_dates  = df_daily_chart["날짜"].tolist()
+        chart_rev    = df_daily_chart["매출액"].tolist()
+        chart_roas   = df_daily_chart["ROAS"].tolist()
+
+        chart_html = f"""
+<div style="width:100%;padding:8px 0">
+<canvas id="salesChart" height="80"></canvas>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script>
+const ctx = document.getElementById('salesChart');
+new Chart(ctx, {{
+    data: {{
+        labels: {_json.dumps(chart_dates)},
+        datasets: [
+            {{
+                type: 'bar',
+                label: '매출',
+                data: {_json.dumps(chart_rev)},
+                backgroundColor: 'rgba(80,80,80,0.75)',
+                yAxisID: 'y',
+                order: 2,
+            }},
+            {{
+                type: 'line',
+                label: 'ROAS',
+                data: {_json.dumps(chart_roas)},
+                borderColor: 'rgba(220,130,130,0.9)',
+                backgroundColor: 'transparent',
+                borderWidth: 2,
+                pointRadius: 2,
+                tension: 0.4,
+                yAxisID: 'y1',
+                order: 1,
+            }}
+        ]
+    }},
+    options: {{
+        responsive: true,
+        interaction: {{ mode: 'index', intersect: false }},
+        plugins: {{
+            legend: {{ position: 'bottom', labels: {{ font: {{ size: 11 }} }} }}
+        }},
+        scales: {{
+            x: {{ ticks: {{ maxRotation: 45, font: {{ size: 10 }} }} }},
+            y: {{
+                type: 'linear', position: 'left',
+                title: {{ display: true, text: '매출 (원)' }},
+                ticks: {{ font: {{ size: 10 }},
+                    callback: v => v>=10000 ? (v/10000).toFixed(0)+'만' : v }}
+            }},
+            y1: {{
+                type: 'linear', position: 'right',
+                title: {{ display: true, text: 'ROAS (%)' }},
+                ticks: {{ font: {{ size: 10 }}, callback: v => v+'%' }},
+                grid: {{ drawOnChartArea: false }}
+            }}
+        }}
+    }}
+}});
+</script>
+"""
+        st.components.v1.html(chart_html, height=360)
+    except Exception as e:
+        st.warning(f"차트 생성 오류: {e}")
+
+    # ════════════════════════════════════════════════════════
+    # 7. 일자별 성과
+    # ════════════════════════════════════════════════════════
+    st.markdown("---")
+    st.markdown("### ▣ 일자 별 성과")
+
+    df_f["날짜str"] = df_f["날짜"].dt.strftime("%Y-%m-%d")
+
+    # 매체 / 랜딩 필터 (이미지의 슬라이서)
+    fc_a, fc_b = st.columns(2)
+    with fc_a:
+        if "매체" in df_f.columns:
+            media_opts = ["전체"] + sorted(df_f["매체"].dropna().unique().tolist())
+            sel_media_d = st.multiselect("매체 필터", media_opts[1:], default=[], key="day_media")
+        else:
+            sel_media_d = []
+    with fc_b:
+        if "랜딩페이지" in df_f.columns:
+            landing_opts = sorted(df_f["랜딩페이지"].dropna().unique().tolist())
+            sel_landing_d = st.multiselect("랜딩 필터", landing_opts, default=[], key="day_landing")
+        else:
+            sel_landing_d = []
+
+    df_day = df_f.copy()
+    if sel_media_d and "매체" in df_day.columns:
+        df_day = df_day[df_day["매체"].isin(sel_media_d)]
+    if sel_landing_d and "랜딩페이지" in df_day.columns:
+        df_day = df_day[df_day["랜딩페이지"].isin(sel_landing_d)]
+
+    day_rows = {}
+    for ds, grp in df_day.groupby("날짜str"):
+        day_rows[ds] = calc_row(grp)
+    day_rows["Total"] = calc_row(df_day)
+    df_day_perf = make_display_df(day_rows).rename(columns={"Campaign":"Date"})
+    st.dataframe(df_day_perf, use_container_width=True, height=420, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════
