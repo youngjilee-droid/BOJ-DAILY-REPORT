@@ -1589,8 +1589,8 @@ elif page == "📊 Sales 리포트":
         chart_roas   = df_daily_chart["ROAS"].tolist()
 
         chart_html = f"""
-<div style="width:100%;padding:8px 0">
-<canvas id="salesChart" height="80"></canvas>
+<div style="width:100%; height:430px; padding:12px 8px 28px 8px; box-sizing:border-box;">
+  <canvas id="salesChart"></canvas>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script>
@@ -1623,22 +1623,32 @@ new Chart(ctx, {{
     }},
     options: {{
         responsive: true,
+        maintainAspectRatio: false,
+        layout: {{
+            padding: {{ top: 8, right: 8, bottom: 24, left: 8 }}
+        }},
         interaction: {{ mode: 'index', intersect: false }},
         plugins: {{
-            legend: {{ position: 'bottom', labels: {{ font: {{ size: 11 }} }} }}
+            legend: {{ position: 'bottom', labels: {{ font: {{ size: 11 }}, padding: 16, boxWidth: 12 }} }}
         }},
         scales: {{
-            x: {{ ticks: {{ maxRotation: 45, font: {{ size: 10 }} }} }},
+            x: {{
+                ticks: {{ maxRotation: 45, minRotation: 45, font: {{ size: 10 }}, padding: 8 }},
+                grid: {{ display: true }}
+            }},
             y: {{
                 type: 'linear', position: 'left',
                 title: {{ display: true, text: '매출 (원)' }},
-                ticks: {{ font: {{ size: 10 }},
-                    callback: v => v>=10000 ? (v/10000).toFixed(0)+'만' : v }}
+                ticks: {{
+                    font: {{ size: 10 }},
+                    padding: 6,
+                    callback: v => v>=10000 ? (v/10000).toFixed(0)+'만' : v
+                }}
             }},
             y1: {{
                 type: 'linear', position: 'right',
                 title: {{ display: true, text: 'ROAS (%)' }},
-                ticks: {{ font: {{ size: 10 }}, callback: v => v+'%' }},
+                ticks: {{ font: {{ size: 10 }}, padding: 6, callback: v => v+'%' }},
                 grid: {{ drawOnChartArea: false }}
             }}
         }}
@@ -1646,7 +1656,7 @@ new Chart(ctx, {{
 }});
 </script>
 """
-        st.components.v1.html(chart_html, height=360)
+        st.components.v1.html(chart_html, height=450)
     except Exception as e:
         st.warning(f"차트 생성 오류: {e}")
 
