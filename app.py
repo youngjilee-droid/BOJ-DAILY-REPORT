@@ -633,9 +633,24 @@ def filter_media(df, media_key):
     return df[df["캠페인명"].str.contains("|".join(kws), case=False, na=False)]
 
 def agg_kpi(df):
-    return {"spend": df["비용"].sum(), "purchase": df["구매"].sum(),
-            "revenue": df["매출액"].sum(), "click": df["클릭"].sum(),
-            "impression": df["노출"].sum()}
+    sp = df["비용"].sum()
+    pu = df["구매"].sum()
+    rv = df["매출액"].sum()
+    cl = df["클릭"].sum()
+    im = df["노출"].sum()
+    return {
+        "spend":      sp,
+        "purchase":   pu,
+        "revenue":    rv,
+        "click":      cl,
+        "impression": im,
+        "roas":       rv/sp*100   if sp > 0 else 0,
+        "ctr":        cl/im*100   if im > 0 else 0,
+        "cvr":        pu/cl*100   if cl > 0 else 0,
+        "aov":        rv/pu       if pu > 0 else 0,
+        "cpc":        sp/cl       if cl > 0 else 0,
+        "cpa":        sp/pu       if pu > 0 else 0,
+    }
 
 def daily_agg(df, dt):
     return agg_kpi(df[df["날짜"].dt.date == dt.date()])
@@ -649,10 +664,70 @@ def prev_week_avg(df, dt):
     d = df[(df["날짜"].dt.date >= ws.date()) & (df["날짜"].dt.date <= we.date())]
     if len(d) == 0: return None
     days = max(d["날짜"].dt.date.nunique(), 1)
-    sp = d["비용"].sum()
-    return {"spend": sp/days, "purchase": d["구매"].sum()/days,
-            "revenue": d["매출액"].sum()/days,
-            "roas": d["매출액"].sum()/sp*100 if sp > 0 else 0}
+    sp = d["비용"].sum(); cl = d["클릭"].sum()
+    pu = d["구매"].sum(); rv = d["매출액"].sum()
+    return {
+        "spend":    sp/days,
+        "purchase": pu/days,
+        "revenue":  rv/days,
+        "roas":     rv/sp*100 if sp > 0 else 0,
+        "ctr":      cl/(d["노출"].sum())*100 if d["노출"].sum() > 0 else 0,
+        "cvr":      pu/cl*100 if cl > 0 else 0,
+        "aov":      rv/pu     if pu > 0 else 0,
+    }
+
+def get_creative_insights(df_sub, target_dt, prev_day_dt, top_n=5):
+    """
+    소재(광고명)별 전일 대비 구매·AOV 변화 상위 항목 추출.
+    반환: 텍스트 문자열 (AI 프롬프트에 삽입용)
+    """
+    ad_col = None
+    for c in ["광고명", "광고명/소재명", "소재명"]:
+        if c in df_sub.columns:
+            ad_col = c; break
+    if ad_col is None:
+        return ""
+
+    def _day(df, dt):
+        return df[df["날짜"].dt.date == dt.date()] if pd.notna(dt) else df.iloc[0:0]
+
+    today_df = _day(df_sub, target_dt)
+    prev_df  = _day(df_sub, prev_day_dt)
+
+    if today_df.empty: return ""
+
+    today_grp = today_df.groupby(ad_col).agg(
+        비용=("비용","sum"), 구매=("구매","sum"), 매출액=("매출액","sum")
+    ).reset_index()
+    today_grp["AOV"]  = today_grp.apply(lambda r: r["매출액"]/r["구매"] if r["구매"]>0 else 0, axis=1)
+    today_grp["ROAS"] = today_grp.apply(lambda r: r["매출액"]/r["비용"]*100 if r["비용"]>0 else 0, axis=1)
+
+    if not prev_df.empty:
+        prev_grp = prev_df.groupby(ad_col).agg(
+            구매_전일=("구매","sum"), 매출액_전일=("매출액","sum")
+        ).reset_index()
+        today_grp = today_grp.merge(prev_grp, on=ad_col, how="left")
+        today_grp["구매_전일"]  = today_grp.get("구매_전일",  pd.Series([0]*len(today_grp))).fillna(0)
+        today_grp["매출액_전일"] = today_grp.get("매출액_전일", pd.Series([0]*len(today_grp))).fillna(0)
+        today_grp["구매변화"] = today_grp["구매"] - today_grp["구매_전일"]
+        today_grp["매출변화"] = today_grp["매출액"] - today_grp["매출액_전일"]
+    else:
+        today_grp["구매변화"] = today_grp["구매"]
+        today_grp["매출변화"] = today_grp["매출액"]
+
+    # 매출 변화 절댓값 기준 상위 top_n
+    top = today_grp.reindex(today_grp["매출변화"].abs().sort_values(ascending=False).index).head(top_n)
+    if top.empty: return ""
+
+    lines = ["[소재별 성과 (전일 대비 매출 변화 상위)]"]
+    for _, r in top.iterrows():
+        name = str(r[ad_col])[:20]
+        pur_ch = f"{r['구매변화']:+.0f}건"
+        rev_ch = f"{r['매출변화']/10000:+.1f}만원"
+        aov_str = f"AOV {r['AOV']/10000:.1f}만원" if r["AOV"] > 0 else ""
+        roas_str = f"ROAS {r['ROAS']:.0f}%"
+        lines.append(f"  [{name}] 구매 {pur_ch}, 매출 {rev_ch} / {aov_str} {roas_str}".strip())
+    return "\n".join(lines)
 
 def build_topline(label, target_dt, today, prev_day, pw, monthly, weekly, rtype):
     today_roas = fmt_roas(today["spend"], today["revenue"])
@@ -699,33 +774,73 @@ def _get_few_shot_examples(label, n=5):
     return "\n".join(lines)
 
 
-def gen_ai_insight(api_key, today, prev_day, pw, label, target_dt, note=""):
+def gen_ai_insight(api_key, today, prev_day, pw, label, target_dt,
+                   note="", creative_insight=""):
     if not OPENAI_AVAILABLE: return "(openai 패키지 미설치)"
     try:
         client = openai.OpenAI(api_key=api_key)
-        roas_t = today["revenue"]/today["spend"]*100 if today["spend"] else 0
-        roas_p = prev_day["revenue"]/prev_day["spend"]*100 if prev_day and prev_day["spend"] else 0
-        roas_w = pw["roas"] if pw else 0
+
+        def _v(d, k, default=0): return d.get(k, default) or default
+
+        # 오늘 KPI
+        sp_t  = _v(today, "spend");   pu_t = _v(today, "purchase")
+        rv_t  = _v(today, "revenue"); cl_t = _v(today, "click")
+        roas_t = rv_t/sp_t*100 if sp_t else 0
+        ctr_t  = _v(today, "ctr");   cvr_t = _v(today, "cvr"); aov_t = _v(today, "aov")
+
+        # 전일 KPI
+        sp_p   = _v(prev_day,"spend");  pu_p = _v(prev_day,"purchase")
+        rv_p   = _v(prev_day,"revenue"); cl_p = _v(prev_day,"click")
+        roas_p = rv_p/sp_p*100 if sp_p else 0
+        ctr_p  = _v(prev_day,"ctr"); cvr_p = _v(prev_day,"cvr"); aov_p = _v(prev_day,"aov")
+
+        # 전주 평균
+        roas_w = _v(pw,"roas"); cvr_w = _v(pw,"cvr"); aov_w = _v(pw,"aov")
+
+        # 변화량 계산
+        def _diff(a, b): return a - b if b else None
+        def _fmt_diff(d, unit=""):
+            if d is None: return "비교불가"
+            return f"{d:+.0f}{unit}"
+
+        roas_diff = _diff(roas_t, roas_p); cvr_diff = _diff(cvr_t, cvr_p)
+        aov_diff  = _diff(aov_t,  aov_p)
+        pu_diff   = int(pu_t - pu_p) if pu_p else None
 
         few_shot = _get_few_shot_examples(label, n=5)
 
         system_msg = """당신은 BOJ(뷰티오브조선) 디지털 광고 성과 분석 전문가입니다.
-과거 코멘트 예시가 제공되면 그 형식·어투·표현 방식을 정확히 따라서 작성하세요.
-예시가 없으면 아래 규칙을 따르세요:
-- 2~4줄 bullet(ㄴ 또는 - 시작)
-- 유의미한 변화만 언급 (ROAS 5%p 이상 변화)
-- "약 X만 원" / "X%p 상승/하락" 형식
-- 인사말·서론 없이 bullet로 바로 시작"""
+
+과거 코멘트 예시가 있으면 그 형식·어투를 그대로 따르세요.
+없으면 다음 규칙을 따르세요:
+- bullet은 "ㄴ" 또는 "-" 로 시작
+- 수치 변화가 유의미한 항목만 언급 (ROAS 5%p, CVR 1%p, AOV 5천원 이상 변화)
+- "전일 대비", "전주 평균 대비" 표현 사용
+- 소재·상품 단위 인사이트가 있으면 대괄호로 감싸서 언급: [소재명]
+- 수치 표현: "약 X만 원", "X%p 상승/하락", "X건 증가/감소"
+- 인사말·서론 없이 bullet로 바로 시작
+- 2~5줄 작성"""
 
         user_msg = f"""{few_shot}
 
 [분석 대상: {label} / {target_dt.strftime('%m/%d')}]
-[오늘] 광고비:{today['spend']:,.0f}원 / 구매:{today['purchase']:.0f}건 / 매출:{today['revenue']:,.0f}원 / ROAS:{roas_t:.0f}%
-[전일] 광고비:{prev_day['spend']:,.0f}원 / ROAS:{roas_p:.0f}% / 구매:{prev_day['purchase']:.0f}건
-[전주평균] 광고비:{pw['spend']:,.0f}원 / ROAS:{roas_w:.0f}% / 구매:{pw['purchase']:.0f}건
-{f'[메모] {note}' if note else ''}
 
-위 데이터로 특이사항 코멘트를 작성하세요."""
+[오늘 성과]
+광고비: {sp_t:,.0f}원 | 구매: {pu_t:.0f}건 | 매출: {rv_t:,.0f}원
+ROAS: {roas_t:.0f}% | CTR: {ctr_t:.2f}% | CVR: {cvr_t:.2f}% | AOV: {aov_t:,.0f}원
+
+[전일 대비 변화]
+ROAS: {_fmt_diff(roas_diff, "%p")} | CVR: {_fmt_diff(cvr_diff, "%p")} | AOV: {_fmt_diff(aov_diff, "원")}
+구매: {_fmt_diff(pu_diff, "건")} | 매출: {_fmt_diff(_diff(rv_t,rv_p),"원") if rv_p else "비교불가"}
+
+[전주 평균 대비]
+ROAS 전주: {roas_w:.0f}% → 오늘: {roas_t:.0f}% ({_fmt_diff(_diff(roas_t,roas_w),"%p")})
+CVR 전주: {cvr_w:.2f}% → 오늘: {cvr_t:.2f}% | AOV 전주: {aov_w:,.0f}원 → 오늘: {aov_t:,.0f}원
+
+{creative_insight}
+{f"[운영 메모] {note}" if note else ""}
+
+위 데이터를 바탕으로 특이사항 코멘트를 작성하세요."""
 
         resp = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -733,7 +848,7 @@ def gen_ai_insight(api_key, today, prev_day, pw, label, target_dt, note=""):
                 {"role": "system", "content": system_msg},
                 {"role": "user",   "content": user_msg},
             ],
-            max_tokens=500, temperature=0.3)
+            max_tokens=600, temperature=0.3)
         return resp.choices[0].message.content.strip()
     except Exception as e:
         return f"(AI 오류: {str(e)[:80]})"
@@ -754,22 +869,48 @@ def render_media_comment(mk, df_m, target_dt, prev_day_dt, month_start, week_sta
         pw      = prev_week_avg(df_sub, target_dt)
         monthly = period_agg(df_sub, month_start, target_dt)
         weekly  = period_agg(df_sub, week_start, target_dt) if rtype in ["weekly", "both"] else None
-        roas_val = today_d["revenue"]/today_d["spend"]*100 if today_d["spend"] else 0
+
+        roas_val = today_d.get("roas", 0)
+        ctr_val  = today_d.get("ctr",  0)
+        cvr_val  = today_d.get("cvr",  0)
+        aov_val  = today_d.get("aov",  0)
+        roas_pw  = pw.get("roas", 0) if pw else 0
+
+        # ── KPI 메트릭 (2행: 기본 4개 + 세부 3개) ─────────────
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("광고비",   fmt_won(today_d["spend"]))
         c2.metric("구매건수", f"{int(today_d['purchase']):,}건")
         c3.metric("매출",     fmt_won(today_d["revenue"]))
         c4.metric("ROAS",     f"{roas_val:.0f}%",
-                  delta=f"{roas_val-(pw['roas'] if pw else 0):+.0f}%p vs 전주" if pw else None)
+                  delta=f"{roas_val - roas_pw:+.0f}%p vs 전주" if pw else None)
+
+        c5, c6, c7, _ = st.columns(4)
+        prev_ctr = prev_d.get("ctr", 0); prev_cvr = prev_d.get("cvr", 0)
+        prev_aov = prev_d.get("aov", 0)
+        c5.metric("CTR",  f"{ctr_val:.2f}%",
+                  delta=f"{ctr_val-prev_ctr:+.2f}%p vs 전일" if prev_d["spend"] > 0 else None)
+        c6.metric("CVR",  f"{cvr_val:.2f}%",
+                  delta=f"{cvr_val-prev_cvr:+.2f}%p vs 전일" if prev_d["spend"] > 0 else None)
+        c7.metric("AOV",  f"{aov_val/10000:.1f}만원" if aov_val >= 1000 else f"{aov_val:,.0f}원",
+                  delta=f"{(aov_val-prev_aov)/10000:+.1f}만원 vs 전일" if prev_d["spend"] > 0 else None)
+
         topline = build_topline(sub_label, target_dt, today_d, prev_d, pw, monthly, weekly, rtype)
+
+        # ── 소재별 인사이트 추출 ───────────────────────────────
+        creative_insight = get_creative_insights(df_sub, target_dt, prev_day_dt, top_n=5)
+
         insight = ""
         if api_key and today_d["spend"] > 0:
             with st.spinner(f"{sub_label} AI 분석 중..."):
                 insight = gen_ai_insight(
                     api_key, today_d,
-                    prev_d if prev_d["spend"] > 0 else {"spend":0,"purchase":0,"revenue":0},
-                    pw if pw else {"spend":0,"purchase":0,"revenue":0,"roas":0},
-                    sub_label, target_dt, note)
+                    prev_d if prev_d["spend"] > 0 else
+                        {"spend":0,"purchase":0,"revenue":0,"click":0,"impression":0,
+                         "roas":0,"ctr":0,"cvr":0,"aov":0},
+                    pw if pw else
+                        {"spend":0,"purchase":0,"revenue":0,"roas":0,"ctr":0,"cvr":0,"aov":0},
+                    sub_label, target_dt, note,
+                    creative_insight=creative_insight)
         full = topline + (insight + "\n" if insight else "")
         return full, f"[{sub_label}]\n{full}"
 
@@ -780,7 +921,7 @@ def render_media_comment(mk, df_m, target_dt, prev_day_dt, month_start, week_sta
         st.warning(f"⚠️ {mk}: {target_dt.date()} 데이터 없음 (최신: {max(m_dates) if m_dates else '없음'})")
         st.divider()
         return
-    st.text_area("전체 합산", value=full, height=160, key=f"comment_{mk}_all")
+    st.text_area("전체 합산", value=full, height=180, key=f"comment_{mk}_all")
     if entry: all_comments.append(entry)
     if has_multi_landing:
         st.markdown('<div class="landing-header">랜딩별 상세</div>', unsafe_allow_html=True)
@@ -790,7 +931,7 @@ def render_media_comment(mk, df_m, target_dt, prev_day_dt, month_start, week_sta
             with st.expander(f"📍 {landing}", expanded=True):
                 full_l, entry_l = _render_block(df_land, f"{label} — {landing}")
                 if full_l:
-                    st.text_area("코멘트", value=full_l, height=160, key=f"comment_{mk}_{landing}")
+                    st.text_area("코멘트", value=full_l, height=180, key=f"comment_{mk}_{landing}")
                     if entry_l: all_comments.append(entry_l)
                 else:
                     st.caption("해당 날짜 데이터 없음")
@@ -1004,6 +1145,80 @@ if page == "📝 코멘트 생성기":
         week_start  = target_dt - timedelta(days=target_dt.weekday())
         all_comments = []
         prog = st.progress(0)
+
+        # ════════════════════════════════════════════════════
+        # Step 1 — 랜딩별 합산 탑라인 (네이버 브랜드스토어 / 올리브영)
+        # 매체 → 랜딩 매핑 (Total_Raw 랜딩페이지 컬럼 기준)
+        # ════════════════════════════════════════════════════
+        LANDING_GROUPS = {
+            "네이버 브랜드스토어": {
+                "label":   "Naver 브랜드 스토어 캠페인",
+                "media":   ["Naver BSA", "Naver SSA", "Naver ADVoost"],
+                "landing": ["네이버 브랜드스토어"],
+            },
+            "올리브영": {
+                "label":   "올리브영 캠페인",
+                "media":   ["Meta", "TikTok", "Kakao", "Criteo", "Buzzvil"],
+                "landing": ["올리브영"],
+            },
+        }
+
+        has_landing_col = "랜딩페이지" in df_report.columns
+
+        st.markdown("---")
+        st.markdown("## 🏪 랜딩별 합산")
+
+        for lg_key, lg_cfg in LANDING_GROUPS.items():
+            # 랜딩페이지 컬럼 있으면 그 기준, 없으면 매체명 기준으로 필터
+            if has_landing_col:
+                df_lg = df_report[df_report["랜딩페이지"].isin(lg_cfg["landing"])]
+            else:
+                df_lg = df_report[df_report["캠페인명"].str.contains(
+                    "|".join(lg_cfg["media"]), case=False, na=False)]
+
+            if df_lg.empty:
+                continue
+
+            today_lg  = daily_agg(df_lg, target_dt)
+            if today_lg["spend"] == 0 and today_lg["purchase"] == 0:
+                continue
+
+            prev_lg   = daily_agg(df_lg, prev_day_dt)
+            pw_lg     = prev_week_avg(df_lg, target_dt)
+            monthly_lg = period_agg(df_lg, month_start, target_dt)
+            weekly_lg  = period_agg(df_lg, week_start, target_dt) if rtype in ["weekly","both"] else None
+
+            st.markdown(f"### 🏷️ {lg_cfg['label']}")
+            # KPI 메트릭 (2행)
+            lc1, lc2, lc3, lc4 = st.columns(4)
+            roas_lg = today_lg.get("roas", 0); roas_pw_lg = pw_lg.get("roas",0) if pw_lg else 0
+            lc1.metric("광고비",   fmt_won(today_lg["spend"]))
+            lc2.metric("구매건수", f"{int(today_lg['purchase']):,}건")
+            lc3.metric("매출",     fmt_won(today_lg["revenue"]))
+            lc4.metric("ROAS",     f"{roas_lg:.0f}%",
+                       delta=f"{roas_lg-roas_pw_lg:+.0f}%p vs 전주" if pw_lg else None)
+
+            lc5, lc6, lc7, _ = st.columns(4)
+            lc5.metric("CTR", f"{today_lg.get('ctr',0):.2f}%")
+            lc6.metric("CVR", f"{today_lg.get('cvr',0):.2f}%")
+            aov_lg = today_lg.get("aov", 0)
+            lc7.metric("AOV", f"{aov_lg/10000:.1f}만원" if aov_lg >= 1000 else f"{aov_lg:,.0f}원")
+
+            lg_topline = build_topline(
+                lg_cfg["label"], target_dt,
+                today_lg, prev_lg, pw_lg, monthly_lg, weekly_lg, rtype)
+
+            # 랜딩 합산 텍스트에어리어
+            st.text_area("합산 탑라인", value=lg_topline, height=130,
+                         key=f"landing_summary_{lg_key}")
+            all_comments.append(f"[{lg_cfg['label']}]\n{lg_topline}")
+
+        st.markdown("---")
+        st.markdown("## 📺 매체별 상세")
+
+        # ════════════════════════════════════════════════════
+        # 매체별 코멘트 루프 (기존)
+        # ════════════════════════════════════════════════════
         for idx, mk in enumerate(selected_media):
             df_m = filter_media(df_report, mk)
             if len(df_m) == 0:
