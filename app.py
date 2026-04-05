@@ -1,4 +1,6 @@
 import io
+import json
+import requests
 import openpyxl
 import pandas as pd
 import streamlit as st
@@ -386,8 +388,208 @@ if "media_warnings"    not in st.session_state: st.session_state.media_warnings 
 if "raw_reports"       not in st.session_state: st.session_state.raw_reports       = {}
 if "converted_reports" not in st.session_state: st.session_state.converted_reports = {}
 if "comment_history"   not in st.session_state: st.session_state.comment_history   = []
+if "meta_api_df"       not in st.session_state: st.session_state.meta_api_df       = pd.DataFrame()
 # raw_reports      : {매체명: DataFrame(표준 REPORT_COLS)}  ← RAW 변환 결과 저장
 # converted_reports: {매체명: DataFrame(표준 REPORT_COLS)}  ← 다중 파일 취합 결과 저장
+# meta_api_df      : Meta API로 수집한 데이터 (RAW 변환 페이지에서 활용)
+
+# ══════════════════════════════════════════════════════════════
+# Meta API — facebook Graph API v25.0 연동
+# Streamlit Secrets: META_ACCESS_TOKEN, META_AD_ACCOUNT_ID
+# ══════════════════════════════════════════════════════════════
+
+_META_API_VERSION = "v25.0"
+_META_BASE_URL    = f"https://graph.facebook.com/{_META_API_VERSION}"
+
+def _meta_validate_date(date_text):
+    try:
+        datetime.strptime(date_text, "%Y-%m-%d")
+        return date_text
+    except Exception:
+        raise ValueError(f"날짜 형식이 잘못되었습니다: {date_text}")
+
+def _meta_normalize_account(ad_account_id):
+    s = str(ad_account_id).strip()
+    return s if s.startswith("act_") else f"act_{s}"
+
+def _safe_int(v, default=0):
+    try: return int(float(v))
+    except: return default
+
+def _safe_float(v, default=0.0):
+    try: return float(v)
+    except: return default
+
+def _extract_action_total(action_list, target_types):
+    if not isinstance(action_list, list): return 0.0
+    total = 0.0
+    for item in action_list:
+        if str(item.get("action_type","")).strip() in target_types:
+            total += _safe_float(item.get("value", 0))
+    return total
+
+def _extract_action_first(action_list, priority_types):
+    """우선순위 순서대로 첫 번째 일치 값만 반환 (중복 합산 방지)"""
+    if not isinstance(action_list, list): return 0.0
+    action_map = {str(i.get("action_type","")).strip(): _safe_float(i.get("value",0))
+                  for i in action_list}
+    for t in priority_types:
+        if t in action_map: return action_map[t]
+    return 0.0
+
+def _extract_action_first_fuzzy(action_list, priority_keywords):
+    """키워드 포함 여부로 우선순위 매칭 (정확한 이름이 다를 때)"""
+    if not isinstance(action_list, list): return 0.0
+    for keywords in priority_keywords:
+        for item in action_list:
+            at = str(item.get("action_type","")).strip().lower()
+            if all(kw.lower() in at for kw in keywords):
+                return _safe_float(item.get("value", 0))
+    return 0.0
+
+def _meta_request(url, params):
+    resp = requests.get(url, params=params, timeout=30)
+    if resp.status_code != 200:
+        raise RuntimeError(resp.text)
+    result = resp.json()
+    if "error" in result:
+        raise RuntimeError(str(result["error"]))
+    return result
+
+def fetch_meta_data(start_date: str, end_date: str) -> pd.DataFrame:
+    """
+    Meta Graph API로 광고 인사이트 수집.
+    Streamlit Secrets에 META_ACCESS_TOKEN, META_AD_ACCOUNT_ID 필요.
+    반환: REPORT_COLS 기반 표준 DataFrame (매체='Meta')
+    """
+    try:
+        start_date = _meta_validate_date(start_date)
+        end_date   = _meta_validate_date(end_date)
+    except Exception as e:
+        st.error(str(e)); return pd.DataFrame()
+
+    try:
+        access_token   = str(st.secrets["META_ACCESS_TOKEN"]).strip()
+        ad_account_id  = _meta_normalize_account(st.secrets["META_AD_ACCOUNT_ID"])
+    except Exception:
+        st.error("Streamlit Secrets에 META_ACCESS_TOKEN / META_AD_ACCOUNT_ID를 설정하세요.")
+        return pd.DataFrame()
+
+    url = f"{_META_BASE_URL}/{ad_account_id}/insights"
+
+    collab_fields = [
+        "date_start","date_stop","campaign_name","adset_name","ad_name",
+        "impressions","clicks","spend","reach",
+        "actions","catalog_segment_actions","catalog_segment_value",
+    ]
+    safe_fields = [
+        "date_start","date_stop","campaign_name","adset_name","ad_name",
+        "impressions","clicks","spend","reach","actions",
+    ]
+
+    base_params = {
+        "access_token": access_token,
+        "level": "ad",
+        "limit": 500,
+        "time_increment": 1,
+        "action_attribution_windows": json.dumps(["7d_click","1d_view"]),
+        "action_report_time": "conversion",
+        "time_range": json.dumps({"since": start_date, "until": end_date}, ensure_ascii=False),
+    }
+
+    # 액션 타입 집합
+    _link_click       = {"link_click"}
+    _add_to_cart      = {"add_to_cart","omni_add_to_cart",
+                         "offsite_conversion.fb_pixel_add_to_cart",
+                         "onsite_web_add_to_cart","offsite_conversion.add_to_cart",
+                         "onsite_conversion.add_to_cart"}
+    _follow           = {"follow","follows","instagram_profile_follows","page_like","like"}
+    _engagement       = {"page_engagement","post_engagement","post_interaction_gross","post"}
+    _video_view       = {"video_view"}
+    _initiate_checkout= {"initiate_checkout","omni_initiated_checkout",
+                         "onsite_conversion.initiate_checkout","onsite_web_initiate_checkout"}
+    _purchase_priority= ["shared_items_purchase","purchase_with_shared_items",
+                         "purchases_with_shared_items","website_purchase_with_shared_items",
+                         "catalog_segment_purchase","catalog_segment_omni_purchase",
+                         "purchase","omni_purchase"]
+
+    rows = []
+    next_url = url
+    next_params = dict(base_params)
+    use_collab = True
+
+    try:
+        while next_url:
+            params_copy = dict(next_params)
+            if use_collab:
+                try:
+                    params_copy["fields"] = ",".join(collab_fields)
+                    result = _meta_request(next_url, params_copy)
+                except Exception:
+                    use_collab = False
+                    params_copy["fields"] = ",".join(safe_fields)
+                    result = _meta_request(next_url, params_copy)
+            else:
+                params_copy["fields"] = ",".join(safe_fields)
+                result = _meta_request(next_url, params_copy)
+
+            for item in result.get("data", []):
+                actions         = item.get("actions", [])
+                catalog_actions = item.get("catalog_segment_actions", [])
+                catalog_values  = item.get("catalog_segment_value", [])
+
+                link_clicks = _extract_action_total(actions, _link_click)
+                add_to_cart = _extract_action_total(actions, _add_to_cart)
+                follows     = _extract_action_total(actions, _follow)
+                engagement  = _extract_action_total(actions, _engagement)
+                video_views = _extract_action_total(actions, _video_view)
+                initiate_co = _extract_action_total(actions, _initiate_checkout)
+
+                # 구매·매출: 중복 방지 위해 우선순위 첫 번째만
+                purchase = _extract_action_first(catalog_actions, _purchase_priority)
+                if purchase == 0:
+                    purchase = _extract_action_first_fuzzy(catalog_actions,
+                        [["shared","purchase"],["purchase","shared"],["purchase"]])
+
+                revenue = _extract_action_first(catalog_values, _purchase_priority)
+                if revenue == 0:
+                    revenue = _extract_action_first_fuzzy(catalog_values,
+                        [["shared","purchase"],["purchase","shared"],["purchase"]])
+
+                rows.append({
+                    "날짜":       item.get("date_start",""),
+                    "캠페인명":   item.get("campaign_name",""),
+                    "광고그룹명": item.get("adset_name",""),
+                    "광고명":     item.get("ad_name",""),
+                    "비용":       _safe_float(item.get("spend",0)),
+                    "노출":       _safe_int(item.get("impressions",0)),
+                    "클릭":       _safe_int(link_clicks),
+                    "구매":       purchase,
+                    "매출액":     revenue,
+                    "장바구니":   add_to_cart,
+                    "도달":       _safe_int(item.get("reach",0)),
+                    "참여":       engagement,
+                    "팔로우":     follows,
+                    "동영상 조회": video_views,
+                    "매체":       "Meta",
+                    "_결제시작수": initiate_co,
+                })
+
+            next_url   = result.get("paging",{}).get("next")
+            next_params = dict(base_params)
+
+    except Exception as e:
+        st.error(f"Meta API 오류: {e}")
+        return pd.DataFrame()
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce").dt.strftime("%Y-%m-%d")
+    for col in ["비용","노출","클릭","구매","매출액","장바구니","도달","참여","팔로우","동영상 조회"]:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    return df
 
 # ══════════════════════════════════════════════════════════════
 # ① 코멘트 생성기 전용 함수
@@ -1664,6 +1866,87 @@ elif page == "🔄 RAW 리포트 변환":
             for raw_col, std_col, note in rules:
                 rule_rows.append({"매체": media, "RAW 컬럼": raw_col, "표준 컬럼": std_col, "처리": note})
         st.dataframe(pd.DataFrame(rule_rows), use_container_width=True, height=320, hide_index=True)
+
+    # ── Meta API 자동 수집 ───────────────────────────────────
+    section("▣ Meta API 자동 수집 (Secrets 설정 시 사용 가능)")
+
+    with st.expander("📡 Meta API로 데이터 가져오기", expanded=False):
+        st.caption("Streamlit Secrets에 `META_ACCESS_TOKEN`과 `META_AD_ACCOUNT_ID`가 설정되어 있어야 합니다.")
+
+        # Secrets 설정 여부 확인
+        has_secrets = False
+        try:
+            _ = st.secrets["META_ACCESS_TOKEN"]
+            _ = st.secrets["META_AD_ACCOUNT_ID"]
+            has_secrets = True
+            st.success("✅ Meta API 인증 정보가 설정되어 있습니다.")
+        except Exception:
+            st.warning("⚠️ Streamlit Secrets에 META_ACCESS_TOKEN / META_AD_ACCOUNT_ID가 없습니다.")
+            st.code("""# .streamlit/secrets.toml 예시
+META_ACCESS_TOKEN  = "EAAxxxxxxx..."
+META_AD_ACCOUNT_ID = "123456789"
+""")
+
+        mc1, mc2 = st.columns(2)
+        with mc1:
+            meta_start = st.date_input("시작일", value=datetime.today()-timedelta(days=7), key="meta_api_start")
+        with mc2:
+            meta_end   = st.date_input("종료일", value=datetime.today()-timedelta(days=1), key="meta_api_end")
+
+        if st.button("📥 Meta 데이터 가져오기", type="primary",
+                     use_container_width=True, key="meta_fetch_btn",
+                     disabled=not has_secrets):
+            with st.spinner("Meta API에서 데이터를 가져오는 중..."):
+                df_meta_fetched = fetch_meta_data(
+                    str(meta_start), str(meta_end)
+                )
+            if not df_meta_fetched.empty:
+                st.session_state.meta_api_df = df_meta_fetched
+
+                # converted_reports에 Meta로 병합 (기존 파일 업로드와 동일하게 취급)
+                REPORT_COLS_META = ["날짜","캠페인명","광고그룹명","광고명","비용",
+                                    "노출","클릭","구매","매출액","장바구니",
+                                    "도달","참여","팔로우","동영상 조회"]
+                df_meta_std = df_meta_fetched.copy()
+                # 표준 컬럼만 유지 (없는 컬럼은 None)
+                for col in REPORT_COLS_META:
+                    if col not in df_meta_std.columns:
+                        df_meta_std[col] = None
+                df_meta_std = df_meta_std[REPORT_COLS_META]
+                df_meta_std["날짜"] = pd.to_datetime(df_meta_std["날짜"], errors="coerce")
+
+                if "Meta" in st.session_state.converted_reports:
+                    existing = st.session_state.converted_reports["Meta"]
+                    df_meta_std = pd.concat([existing, df_meta_std], ignore_index=True).drop_duplicates(
+                        subset=["날짜","캠페인명","광고그룹명","광고명"]
+                    ).sort_values(["날짜","캠페인명","광고그룹명","광고명"]).reset_index(drop=True)
+
+                st.session_state.converted_reports["Meta"] = df_meta_std
+                st.success(f"✅ {len(df_meta_fetched):,}행 수집 완료 → converted_reports['Meta']에 저장됨")
+
+                col_p, col_d = st.columns(2)
+                with col_p:
+                    dates = pd.to_datetime(df_meta_fetched["날짜"], errors="coerce").dt.date.dropna()
+                    st.metric("수집 기간", f"{dates.min()} ~ {dates.max()}" if not dates.empty else "-")
+                with col_d:
+                    st.metric("총 행수", f"{len(df_meta_fetched):,}")
+
+                st.dataframe(df_meta_fetched.head(10), use_container_width=True,
+                             height=220, hide_index=True)
+            else:
+                st.warning("수집된 데이터가 없습니다. 날짜 범위와 Secrets 설정을 확인하세요.")
+
+        # 이미 수집된 데이터가 있으면 현황 표시
+        if not st.session_state.meta_api_df.empty:
+            df_prev = st.session_state.meta_api_df
+            dates = pd.to_datetime(df_prev["날짜"], errors="coerce").dt.date.dropna()
+            st.caption(f"현재 수집된 Meta API 데이터: **{len(df_prev):,}행** "
+                       f"({dates.min()} ~ {dates.max()})" if not dates.empty else "")
+            if st.button("🗑️ Meta API 데이터 초기화", key="meta_api_reset"):
+                st.session_state.meta_api_df = pd.DataFrame()
+                if "Meta" in st.session_state.converted_reports:
+                    del st.session_state.converted_reports["Meta"]
+                st.rerun()
 
     # ── 파일 업로드 (매체 구분 없이 한꺼번에) ─────────────────
     section("▣ RAW 파일 업로드 — 매체 구분 없이 모두 업로드하세요")
