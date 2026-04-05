@@ -1692,60 +1692,170 @@ new Chart(ctx, {{
 # ══════════════════════════════════════════════════════════════
 elif page == "📈 리포트 대시보드":
 
+    # ── 데이터 소스 선택 (사이드바 상단) ──────────────────────
     with st.sidebar:
-        st.subheader("📂 RAW 데이터 업로드")
-        st.caption("매체별 RAW 파일(xlsx/csv)을 업로드하세요.")
-        for media in DASHBOARD_MEDIA_LIST:
-            with st.expander(media, expanded=False):
-                up = st.file_uploader(f"{media} RAW", type=["xlsx","csv"],
-                                      key=f"raw_{media}", label_visibility="collapsed")
-                if up:
-                    try:
-                        df_raw = (pd.read_csv(up, encoding="utf-8-sig")
-                                  if up.name.endswith(".csv") else pd.read_excel(up, sheet_name=0))
-                        df_norm, miss = normalize_df(df_raw, media)
-                        st.session_state.media_data[media]    = df_norm
-                        st.session_state.media_warnings[media] = miss
-                        if miss: st.warning(f"미매핑: {', '.join(miss)}")
-                        else:    st.success(f"✅ {len(df_norm):,}행")
-                    except Exception as e:
-                        st.error(f"오류: {e}")
+        st.subheader("📊 데이터 소스")
+        dash_src = st.radio(
+            "데이터 입력 방식",
+            ["📦 통합 데이터 업로드", "📂 매체별 RAW 업로드"],
+            key="dash_src_mode",
+            label_visibility="collapsed",
+        )
         st.divider()
-        st.caption("**업로드 현황**")
-        for media in DASHBOARD_MEDIA_LIST:
-            if media in st.session_state.media_data:
-                warn = st.session_state.media_warnings.get(media,[])
-                st.caption(f"{'🟡' if warn else '🟢'} {media} — {len(st.session_state.media_data[media]):,}행")
-            else:
-                st.caption(f"⚪ {media} — 미업로드")
-        st.divider()
-        if st.button("🗑️ 전체 초기화", use_container_width=True, key="dash_reset"):
-            st.session_state.media_data = {}
-            st.session_state.media_warnings = {}
-            st.rerun()
+
+        # ── 모드 A: 통합 데이터 직접 업로드 ──────────────────
+        if dash_src == "📦 통합 데이터 업로드":
+            st.subheader("📦 통합 데이터 업로드")
+            st.caption("RAW 변환 페이지에서 다운로드한 통합 xlsx 또는 csv를 업로드하세요.")
+
+            integrated_up = st.file_uploader(
+                "통합 리포트 파일",
+                type=["xlsx", "csv"],
+                key="dash_integrated_upload",
+                label_visibility="collapsed",
+            )
+
+            if integrated_up:
+                try:
+                    fname = integrated_up.name
+                    if fname.endswith(".csv"):
+                        df_intg = pd.read_csv(integrated_up, encoding="utf-8-sig")
+                        df_intg.columns = [str(c).strip() for c in df_intg.columns]
+                    else:
+                        # xlsx: Total_Raw 시트 우선, 없으면 첫 번째 시트
+                        xl = pd.ExcelFile(integrated_up)
+                        sheet = "Total_Raw" if "Total_Raw" in xl.sheet_names else xl.sheet_names[0]
+                        df_intg = pd.read_excel(integrated_up, sheet_name=sheet)
+                        df_intg.columns = [str(c).strip() for c in df_intg.columns]
+
+                    # 날짜·숫자 타입 정규화
+                    df_intg["날짜"] = pd.to_datetime(df_intg["날짜"], errors="coerce")
+                    for col in ["비용","노출","클릭","구매","매출액","장바구니"]:
+                        if col in df_intg.columns:
+                            df_intg[col] = pd.to_numeric(
+                                df_intg[col].astype(str)
+                                    .str.replace(",","").str.replace("₩","").str.strip(),
+                                errors="coerce").fillna(0)
+
+                    # 매체 컬럼 없으면 캠페인명으로 추정
+                    if "매체" not in df_intg.columns:
+                        df_intg["매체"] = "통합"
+
+                    # 랜딩페이지 컬럼 없으면 생성
+                    if "랜딩페이지" not in df_intg.columns:
+                        df_intg["랜딩페이지"] = "미분류"
+
+                    # 광고명/소재명 컬럼 통일
+                    if "광고명/소재명" not in df_intg.columns:
+                        ad_col = next((c for c in ["광고명","소재명","Ad name","ad name"]
+                                       if c in df_intg.columns), None)
+                        df_intg["광고명/소재명"] = df_intg[ad_col] if ad_col else ""
+
+                    st.session_state.integrated_df = df_intg
+                    dates = df_intg["날짜"].dropna().dt.date
+                    st.success(f"✅ {len(df_intg):,}행 로드 완료")
+                    st.caption(f"기간: {dates.min()} ~ {dates.max()}")
+                    if "매체" in df_intg.columns:
+                        for m, cnt in df_intg["매체"].value_counts().items():
+                            st.caption(f"  {m}: {cnt:,}행")
+                except Exception as e:
+                    st.error(f"로드 오류: {e}")
+
+            # 현재 로드 현황
+            if "integrated_df" in st.session_state and not st.session_state.integrated_df.empty:
+                st.divider()
+                df_i = st.session_state.integrated_df
+                st.caption(f"현재 로드: **{len(df_i):,}행**")
+                if st.button("🗑️ 통합 데이터 초기화", use_container_width=True, key="intg_reset"):
+                    st.session_state.integrated_df = pd.DataFrame()
+                    st.rerun()
+
+        # ── 모드 B: 매체별 RAW 업로드 (기존) ─────────────────
+        else:
+            st.subheader("📂 RAW 데이터 업로드")
+            st.caption("매체별 RAW 파일(xlsx/csv)을 업로드하세요.")
+            for media in DASHBOARD_MEDIA_LIST:
+                with st.expander(media, expanded=False):
+                    up = st.file_uploader(f"{media} RAW", type=["xlsx","csv"],
+                                          key=f"raw_{media}", label_visibility="collapsed")
+                    if up:
+                        try:
+                            df_raw = (pd.read_csv(up, encoding="utf-8-sig")
+                                      if up.name.endswith(".csv") else pd.read_excel(up, sheet_name=0))
+                            df_norm, miss = normalize_df(df_raw, media)
+                            st.session_state.media_data[media]    = df_norm
+                            st.session_state.media_warnings[media] = miss
+                            if miss: st.warning(f"미매핑: {', '.join(miss)}")
+                            else:    st.success(f"✅ {len(df_norm):,}행")
+                        except Exception as e:
+                            st.error(f"오류: {e}")
+            st.divider()
+            st.caption("**업로드 현황**")
+            for media in DASHBOARD_MEDIA_LIST:
+                if media in st.session_state.media_data:
+                    warn = st.session_state.media_warnings.get(media,[])
+                    st.caption(f"{'🟡' if warn else '🟢'} {media} — {len(st.session_state.media_data[media]):,}행")
+                else:
+                    st.caption(f"⚪ {media} — 미업로드")
+            st.divider()
+            if st.button("🗑️ 전체 초기화", use_container_width=True, key="dash_reset"):
+                st.session_state.media_data = {}
+                st.session_state.media_warnings = {}
+                st.rerun()
+
+    # ── 세션 초기화 (integrated_df) ──────────────────────────
+    if "integrated_df" not in st.session_state:
+        st.session_state.integrated_df = pd.DataFrame()
 
     st.title("📈 리포트 대시보드")
-    st.caption("매체별 RAW 파일을 사이드바에 업로드하면 리포트가 생성됩니다.")
 
-    if not st.session_state.media_data:
-        st.info("👈 사이드바에서 매체별 RAW 파일을 업로드하세요.")
-        with st.expander("📋 매체별 컬럼 매핑 현황"):
-            rows = []
-            for m,mapping in MEDIA_COL_MAP.items():
-                note = "✅ 전용 변환 로직" if m in TRANSFORM_MAP else ""
-                for sk,sn in STD_COLS.items():
-                    cands = [c for c in mapping.get(sk,[]) if c]
-                    rows.append({"매체":m,"표준 컬럼":sn,
-                                 "인식 가능한 RAW 컬럼명":" / ".join(cands) if cands else "❌",
-                                 "비고":note if sk=="date" else ""})
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, height=400, hide_index=True)
-        st.stop()
+    # ── 데이터 소스에 따라 df_all 결정 ───────────────────────
+    if dash_src == "📦 통합 데이터 업로드":
+        st.caption("통합 리포트 파일을 사이드바에서 업로드하면 대시보드가 생성됩니다.")
 
-    all_dfs      = list(st.session_state.media_data.values())
-    df_all       = pd.concat(all_dfs, ignore_index=True)
-    loaded_media = list(st.session_state.media_data.keys())
-    tab_labels   = ["📈 Sales Overview"] + [f"📺 {m}" for m in loaded_media] + ["⚙️ 컬럼 매핑"]
-    tabs         = st.tabs(tab_labels)
+        if st.session_state.integrated_df.empty:
+            st.info("👈 사이드바에서 통합 리포트 파일(xlsx / csv)을 업로드하세요.")
+            st.markdown("""
+**지원 파일:**
+- 🔄 RAW 리포트 변환 페이지에서 다운로드한 **통합 리포트 xlsx** (Total_Raw 시트)
+- 동일 구조의 **csv 파일**
+- 코멘트 생성기용 최종 리포트 xlsx (Total_Raw 시트 포함)
+            """)
+            st.stop()
+
+        df_all       = st.session_state.integrated_df.copy()
+        loaded_media = sorted(df_all["매체"].dropna().unique().tolist()) if "매체" in df_all.columns else ["통합"]
+
+    else:
+        st.caption("매체별 RAW 파일을 사이드바에 업로드하면 리포트가 생성됩니다.")
+
+        if not st.session_state.media_data:
+            st.info("👈 사이드바에서 매체별 RAW 파일을 업로드하세요.")
+            with st.expander("📋 매체별 컬럼 매핑 현황"):
+                rows = []
+                for m,mapping in MEDIA_COL_MAP.items():
+                    note = "✅ 전용 변환 로직" if m in TRANSFORM_MAP else ""
+                    for sk,sn in STD_COLS.items():
+                        cands = [c for c in mapping.get(sk,[]) if c]
+                        rows.append({"매체":m,"표준 컬럼":sn,
+                                     "인식 가능한 RAW 컬럼명":" / ".join(cands) if cands else "❌",
+                                     "비고":note if sk=="date" else ""})
+                st.dataframe(pd.DataFrame(rows), use_container_width=True, height=400, hide_index=True)
+            st.stop()
+
+        all_dfs  = list(st.session_state.media_data.values())
+        df_all   = pd.concat(all_dfs, ignore_index=True)
+        loaded_media = list(st.session_state.media_data.keys())
+
+    # 통합 업로드 모드: 매체별 탭 + 컬럼 매핑 탭 없음 / RAW 모드: 기존대로
+    if dash_src == "📦 통합 데이터 업로드":
+        tab_labels = ["📈 Sales Overview"] + [f"📺 {m}" for m in loaded_media]
+        show_col_mapping_tab = False
+    else:
+        tab_labels = ["📈 Sales Overview"] + [f"📺 {m}" for m in loaded_media] + ["⚙️ 컬럼 매핑"]
+        show_col_mapping_tab = True
+
+    tabs = st.tabs(tab_labels)
 
     # ── Tab 0: Sales Overview ─────────────────────────────────
     with tabs[0]:
@@ -1807,8 +1917,14 @@ elif page == "📈 리포트 대시보드":
     # ── Tab 1~N: 매체별 탭 ───────────────────────────────────
     for ti, media in enumerate(loaded_media):
         with tabs[ti+1]:
-            df_m  = st.session_state.media_data[media].copy()
-            warns = st.session_state.media_warnings.get(media,[])
+            # 통합 업로드 모드: df_all에서 해당 매체 필터
+            if dash_src == "📦 통합 데이터 업로드":
+                df_m  = df_all[df_all["매체"] == media].copy() if "매체" in df_all.columns else df_all.copy()
+                warns = []
+            else:
+                df_m  = st.session_state.media_data[media].copy()
+                warns = st.session_state.media_warnings.get(media,[])
+
             st.subheader(f"{media} 성과 리포트")
             if warns: st.warning(f"⚠️ 미매핑 컬럼: {', '.join(warns)}")
 
@@ -1880,66 +1996,65 @@ elif page == "📈 리포트 대시보드":
                 else:
                     st.info("날짜 데이터가 없습니다.")
 
-    # ── Tab 마지막: 컬럼 매핑 설정 ──────────────────────────
-    with tabs[-1]:
-        st.subheader("⚙️ 컬럼 매핑 확인 및 수동 설정")
-        if not st.session_state.media_data:
-            st.info("먼저 사이드바에서 RAW 파일을 업로드하세요.")
-        else:
-            tgt    = st.selectbox("수정할 매체", loaded_media, key="map_media")
-            df_s   = st.session_state.media_data[tgt]
-            w_cols = st.session_state.media_warnings.get(tgt,[])
-            if tgt in TRANSFORM_MAP:
-                st.success(f"✅ {tgt}는 전용 변환 로직이 적용됩니다. 수동 매핑 불필요.")
+    # ── Tab 마지막: 컬럼 매핑 설정 (RAW 모드만 표시) ─────────
+    if show_col_mapping_tab:
+        with tabs[-1]:
+            st.subheader("⚙️ 컬럼 매핑 확인 및 수동 설정")
+            if not st.session_state.media_data:
+                st.info("먼저 사이드바에서 RAW 파일을 업로드하세요.")
             else:
-                st.markdown(f"**미매핑 컬럼:** {', '.join(w_cols) if w_cols else '없음 (정상)'}")
-            st.dataframe(df_s.head(5), use_container_width=True, hide_index=True)
-
-            if tgt not in TRANSFORM_MAP:
-                st.divider()
-                re_up = st.file_uploader(f"{tgt} 재업로드", type=["xlsx","csv"], key=f"remap_{tgt}")
-                if re_up:
-                    df_re = (pd.read_csv(re_up, encoding="utf-8-sig")
-                             if re_up.name.endswith(".csv") else pd.read_excel(re_up, sheet_name=0))
-                    raw_cols = ["(없음)"] + df_re.columns.tolist()
-                    st.write("RAW 컬럼:", df_re.columns.tolist())
-                    manual_map = {}
-                    cp = st.columns(2)
-                    for i,(sk,sn) in enumerate(STD_COLS.items()):
-                        with cp[i%2]:
-                            sel = st.selectbox(sn, raw_cols, key=f"man_{tgt}_{sk}")
-                            if sel != "(없음)": manual_map[sk] = sel
-                    if st.button("✅ 매핑 적용", type="primary"):
-                        result, miss2 = {}, []
-                        for sk,sn in STD_COLS.items():
-                            if sk in manual_map:
-                                result[sn] = df_re[manual_map[sk]]
-                            else:
-                                result[sn] = pd.Series([None]*len(df_re))
-                                if sk not in ["cart","ad","landing"]: miss2.append(sn)
-                        df_new = pd.DataFrame(result)
-                        df_new["날짜"] = pd.to_datetime(df_new["날짜"], errors="coerce")
-                        for col in ["비용","노출","클릭","구매","매출액","장바구니"]:
-                            df_new[col] = pd.to_numeric(
-                                df_new[col].astype(str).str.replace(",","").str.replace("₩","").str.strip(),
-                                errors="coerce").fillna(0)
-                        df_new["랜딩페이지"] = df_new["랜딩페이지"].fillna("미분류").astype(str).str.strip()
-                        df_new["매체"] = tgt
-                        st.session_state.media_data[tgt]    = df_new
-                        st.session_state.media_warnings[tgt] = miss2
-                        st.success("✅ 적용 완료!")
-                        st.rerun()
-
-        st.divider()
-        st.markdown("**전체 컬럼 매핑 현황**")
-        mr = []
-        for m,mapping in MEDIA_COL_MAP.items():
-            for sk,sn in STD_COLS.items():
-                cands = [c for c in mapping.get(sk,[]) if c]
-                mr.append({"매체":m,"표준 컬럼":sn,
-                           "인식 가능한 컬럼명":" / ".join(cands) if cands else "❌",
-                           "변환방식":"전용 함수" if (m in TRANSFORM_MAP and sk=="date") else ""})
-        st.dataframe(pd.DataFrame(mr), use_container_width=True, height=400, hide_index=True)
+                tgt    = st.selectbox("수정할 매체", loaded_media, key="map_media")
+                df_s   = st.session_state.media_data[tgt]
+                w_cols = st.session_state.media_warnings.get(tgt,[])
+                if tgt in TRANSFORM_MAP:
+                    st.success(f"✅ {tgt}는 전용 변환 로직이 적용됩니다. 수동 매핑 불필요.")
+                else:
+                    st.markdown(f"**미매핑 컬럼:** {', '.join(w_cols) if w_cols else '없음 (정상)'}")
+                st.dataframe(df_s.head(5), use_container_width=True, hide_index=True)
+                if tgt not in TRANSFORM_MAP:
+                    st.divider()
+                    re_up = st.file_uploader(f"{tgt} 재업로드", type=["xlsx","csv"], key=f"remap_{tgt}")
+                    if re_up:
+                        df_re = (pd.read_csv(re_up, encoding="utf-8-sig")
+                                 if re_up.name.endswith(".csv") else pd.read_excel(re_up, sheet_name=0))
+                        raw_cols = ["(없음)"] + df_re.columns.tolist()
+                        st.write("RAW 컬럼:", df_re.columns.tolist())
+                        manual_map = {}
+                        cp = st.columns(2)
+                        for i,(sk,sn) in enumerate(STD_COLS.items()):
+                            with cp[i%2]:
+                                sel = st.selectbox(sn, raw_cols, key=f"man_{tgt}_{sk}")
+                                if sel != "(없음)": manual_map[sk] = sel
+                        if st.button("✅ 매핑 적용", type="primary"):
+                            result, miss2 = {}, []
+                            for sk,sn in STD_COLS.items():
+                                if sk in manual_map:
+                                    result[sn] = df_re[manual_map[sk]]
+                                else:
+                                    result[sn] = pd.Series([None]*len(df_re))
+                                    if sk not in ["cart","ad","landing"]: miss2.append(sn)
+                            df_new = pd.DataFrame(result)
+                            df_new["날짜"] = pd.to_datetime(df_new["날짜"], errors="coerce")
+                            for col in ["비용","노출","클릭","구매","매출액","장바구니"]:
+                                df_new[col] = pd.to_numeric(
+                                    df_new[col].astype(str).str.replace(",","").str.replace("₩","").str.strip(),
+                                    errors="coerce").fillna(0)
+                            df_new["랜딩페이지"] = df_new["랜딩페이지"].fillna("미분류").astype(str).str.strip()
+                            df_new["매체"] = tgt
+                            st.session_state.media_data[tgt]    = df_new
+                            st.session_state.media_warnings[tgt] = miss2
+                            st.success("✅ 적용 완료!")
+                            st.rerun()
+            st.divider()
+            st.markdown("**전체 컬럼 매핑 현황**")
+            mr = []
+            for m,mapping in MEDIA_COL_MAP.items():
+                for sk,sn in STD_COLS.items():
+                    cands = [c for c in mapping.get(sk,[]) if c]
+                    mr.append({"매체":m,"표준 컬럼":sn,
+                               "인식 가능한 컬럼명":" / ".join(cands) if cands else "❌",
+                               "변환방식":"전용 함수" if (m in TRANSFORM_MAP and sk=="date") else ""})
+            st.dataframe(pd.DataFrame(mr), use_container_width=True, height=400, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════
