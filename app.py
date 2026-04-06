@@ -1329,13 +1329,184 @@ def make_agg_table(df, group_cols):
     return kpi_table(grp)
 
 
+
+
+# ══════════════════════════════════════════════════════════════
+# NAVER DataLab 검색어 트렌드 API
+# Streamlit Secrets: NAVER_DATALAB_CLIENT_ID, NAVER_DATALAB_CLIENT_SECRET
+# ══════════════════════════════════════════════════════════════
+NAVER_DATALAB_TAB1 = ["조선미녀", "라운드랩", "아누아", "메디큐브", "달바"]
+NAVER_DATALAB_TAB2 = ["조선미녀", "조선미녀선크림", "조선미녀선세럼", "조선미녀맑은쌀선크림", "조선미녀세럼"]
+NAVER_DATALAB_API_URL = "https://openapi.naver.com/v1/datalab/search"
+
+@st.cache_data(show_spinner=False, ttl=60 * 30)
+def fetch_naver_datalab_trend(start_date, end_date, time_unit, keyword_groups,
+                              device="", gender="", ages=None):
+    """
+    네이버 DataLab 검색어 트렌드 조회.
+    반환: (pivot_df, raw_df)
+      - pivot_df: index=period, columns=groupName, values=ratio
+      - raw_df  : period / 키워드 / ratio
+    """
+    ages = ages or []
+
+    try:
+        client_id = str(st.secrets["NAVER_DATALAB_CLIENT_ID"]).strip()
+        client_secret = str(st.secrets["NAVER_DATALAB_CLIENT_SECRET"]).strip()
+    except Exception:
+        raise RuntimeError(
+            "Streamlit Secrets에 NAVER_DATALAB_CLIENT_ID / NAVER_DATALAB_CLIENT_SECRET를 설정하세요."
+        )
+
+    body = {
+        "startDate": str(start_date),
+        "endDate": str(end_date),
+        "timeUnit": time_unit,
+        "keywordGroups": [{"groupName": kw, "keywords": [kw]} for kw in keyword_groups],
+    }
+    if device:
+        body["device"] = device
+    if gender:
+        body["gender"] = gender
+    if ages:
+        body["ages"] = ages
+
+    headers = {
+        "X-Naver-Client-Id": client_id,
+        "X-Naver-Client-Secret": client_secret,
+        "Content-Type": "application/json",
+    }
+
+    resp = requests.post(
+        NAVER_DATALAB_API_URL,
+        headers=headers,
+        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        timeout=30,
+    )
+
+    if resp.status_code != 200:
+        try:
+            err = resp.json()
+        except Exception:
+            err = resp.text
+        raise RuntimeError(f"NAVER DataLab API 오류 ({resp.status_code}): {err}")
+
+    payload = resp.json()
+    results = payload.get("results", [])
+    rows = []
+    for item in results:
+        title = item.get("title", "")
+        for point in item.get("data", []):
+            rows.append({
+                "period": point.get("period"),
+                "키워드": title,
+                "ratio": float(point.get("ratio", 0) or 0),
+            })
+
+    raw_df = pd.DataFrame(rows)
+    if raw_df.empty:
+        return pd.DataFrame(), pd.DataFrame(columns=["period", "키워드", "ratio"])
+
+    raw_df["period"] = pd.to_datetime(raw_df["period"], errors="coerce")
+    raw_df = raw_df.sort_values(["period", "키워드"]).reset_index(drop=True)
+    pivot_df = raw_df.pivot(index="period", columns="키워드", values="ratio").sort_index()
+    return pivot_df, raw_df
+
+
+def render_naver_datalab_tab(tab_key, keyword_groups, default_start, default_end):
+    st.caption("검색량 절대값이 아니라, 요청 기간 내 최고 시점을 100으로 둔 상대 지수입니다.")
+
+    c1, c2, c3 = st.columns([1.2, 1.2, 1])
+    with c1:
+        start_date = st.date_input(
+            "시작일", value=default_start, key=f"ndl_start_{tab_key}"
+        )
+    with c2:
+        end_date = st.date_input(
+            "종료일", value=default_end, key=f"ndl_end_{tab_key}"
+        )
+    with c3:
+        time_unit_label = st.selectbox(
+            "조회 단위", ["일간", "주간", "월간"], index=1, key=f"ndl_unit_{tab_key}"
+        )
+
+    c4, c5, c6 = st.columns([1, 1, 2])
+    with c4:
+        device_label = st.selectbox(
+            "디바이스", ["전체", "모바일", "PC"], index=0, key=f"ndl_device_{tab_key}"
+        )
+    with c5:
+        gender_label = st.selectbox(
+            "성별", ["전체", "여성", "남성"], index=0, key=f"ndl_gender_{tab_key}"
+        )
+    with c6:
+        age_options = {
+            "13~18세": "2", "19~24세": "3", "25~29세": "4", "30~34세": "5",
+            "35~39세": "6", "40~44세": "7", "45~49세": "8", "50~54세": "9",
+            "55~59세": "10", "60세 이상": "11"
+        }
+        age_labels = st.multiselect(
+            "연령", list(age_options.keys()), default=[], key=f"ndl_ages_{tab_key}"
+        )
+
+    if start_date > end_date:
+        st.warning("시작일이 종료일보다 늦습니다.")
+        return
+
+    time_unit_map = {"일간": "date", "주간": "week", "월간": "month"}
+    device_map = {"전체": "", "모바일": "mo", "PC": "pc"}
+    gender_map = {"전체": "", "여성": "f", "남성": "m"}
+    ages = [age_options[a] for a in age_labels]
+
+    try:
+        pivot_df, raw_df = fetch_naver_datalab_trend(
+            start_date=start_date,
+            end_date=end_date,
+            time_unit=time_unit_map[time_unit_label],
+            keyword_groups=keyword_groups,
+            device=device_map[device_label],
+            gender=gender_map[gender_label],
+            ages=ages,
+        )
+    except Exception as e:
+        st.error(str(e))
+        st.info(
+            "Secrets 예시: NAVER_DATALAB_CLIENT_ID / NAVER_DATALAB_CLIENT_SECRET"
+        )
+        return
+
+    if pivot_df.empty:
+        st.warning("조회 결과가 없습니다.")
+        return
+
+    st.markdown("##### 검색어 추이")
+    st.line_chart(pivot_df, height=380, use_container_width=True)
+
+    latest_dt = pivot_df.index.max()
+    latest_row = pivot_df.loc[latest_dt].fillna(0).sort_values(ascending=False)
+    latest_tbl = latest_row.reset_index()
+    latest_tbl.columns = ["키워드", "최신 지수"]
+    latest_tbl["기준일"] = pd.to_datetime(latest_dt).strftime("%Y-%m-%d")
+    latest_tbl["최신 지수"] = latest_tbl["최신 지수"].round(2)
+
+    st.markdown("##### 최신 시점 비교")
+    st.dataframe(latest_tbl[["기준일", "키워드", "최신 지수"]], hide_index=True, use_container_width=True)
+
+    with st.expander("원본 데이터 보기"):
+        show_df = raw_df.copy()
+        show_df["period"] = show_df["period"].dt.strftime("%Y-%m-%d")
+        show_df["ratio"] = show_df["ratio"].round(2)
+        st.dataframe(show_df.rename(columns={"period": "기간", "ratio": "검색지수"}),
+                     hide_index=True, use_container_width=True, height=320)
+
+
 # ══════════════════════════════════════════════════════════════
 # 사이드바 네비게이션
 # ══════════════════════════════════════════════════════════════
 with st.sidebar:
     st.title("📊 BOJ 광고 대시보드")
     page = st.radio("페이지",
-                    ["📝 코멘트 생성기", "📊 Sales 리포트",
+                    ["📝 코멘트 생성기", "📊 Sales 리포트", "🔎 네이버 데이터랩",
                      "📈 리포트 대시보드", "🔄 RAW 리포트 변환",
                      "🧠 코멘트 히스토리"],
                     label_visibility="collapsed")
@@ -2118,8 +2289,8 @@ elif page == "📊 Sales 리포트":
         chart_roas   = df_daily_chart["ROAS"].tolist()
 
         chart_html = f"""
-<div style="width:100%;padding:8px 0">
-<canvas id="salesChart" height="80"></canvas>
+<div style="width:100%; height:430px; padding:12px 8px 28px 8px; box-sizing:border-box;">
+  <canvas id="salesChart"></canvas>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script>
@@ -2152,22 +2323,32 @@ new Chart(ctx, {{
     }},
     options: {{
         responsive: true,
+        maintainAspectRatio: false,
+        layout: {{
+            padding: {{ top: 8, right: 8, bottom: 24, left: 8 }}
+        }},
         interaction: {{ mode: 'index', intersect: false }},
         plugins: {{
-            legend: {{ position: 'bottom', labels: {{ font: {{ size: 11 }} }} }}
+            legend: {{ position: 'bottom', labels: {{ font: {{ size: 11 }}, padding: 16, boxWidth: 12 }} }}
         }},
         scales: {{
-            x: {{ ticks: {{ maxRotation: 45, font: {{ size: 10 }} }} }},
+            x: {{
+                ticks: {{ maxRotation: 45, minRotation: 45, font: {{ size: 10 }}, padding: 8 }},
+                grid: {{ display: true }}
+            }},
             y: {{
                 type: 'linear', position: 'left',
                 title: {{ display: true, text: '매출 (원)' }},
-                ticks: {{ font: {{ size: 10 }},
-                    callback: v => v>=10000 ? (v/10000).toFixed(0)+'만' : v }}
+                ticks: {{
+                    font: {{ size: 10 }},
+                    padding: 6,
+                    callback: v => v>=10000 ? (v/10000).toFixed(0)+'만' : v
+                }}
             }},
             y1: {{
                 type: 'linear', position: 'right',
                 title: {{ display: true, text: 'ROAS (%)' }},
-                ticks: {{ font: {{ size: 10 }}, callback: v => v+'%' }},
+                ticks: {{ font: {{ size: 10 }}, padding: 6, callback: v => v+'%' }},
                 grid: {{ drawOnChartArea: false }}
             }}
         }}
@@ -2175,7 +2356,7 @@ new Chart(ctx, {{
 }});
 </script>
 """
-        st.components.v1.html(chart_html, height=360)
+        st.components.v1.html(chart_html, height=450)
     except Exception as e:
         st.warning(f"차트 생성 오류: {e}")
 
@@ -2215,6 +2396,52 @@ new Chart(ctx, {{
     df_day_perf = make_display_df(day_rows).rename(columns={"Campaign":"Date"})
     st.dataframe(df_day_perf, use_container_width=True, height=420, hide_index=True)
 
+
+# ══════════════════════════════════════════════════════════════
+# PAGE — 네이버 데이터랩
+# ══════════════════════════════════════════════════════════════
+elif page == "🔎 네이버 데이터랩":
+
+    st.title("🔎 네이버 데이터랩 검색어 추이")
+    st.caption("네이버 DataLab API로 지정 키워드의 검색어 트렌드를 조회합니다.")
+
+    with st.sidebar:
+        st.subheader("🔐 NAVER DataLab API 설정")
+        st.caption("Streamlit Secrets에 아래 2개 값을 저장하세요.")
+        st.code(
+            """NAVER_DATALAB_CLIENT_ID = "YOUR_CLIENT_ID"
+NAVER_DATALAB_CLIENT_SECRET = "YOUR_CLIENT_SECRET""" ,
+            language="toml"
+        )
+
+    today = datetime.today().date()
+    default_start = max(today - timedelta(days=89), datetime(2016, 1, 1).date())
+    default_end = today
+
+    nd_tab1, nd_tab2 = st.tabs([
+        "브랜드 비교",
+        "조선미녀 세부 키워드",
+    ])
+
+    with nd_tab1:
+        st.markdown("### 브랜드 비교")
+        st.caption("조선미녀 / 라운드랩 / 아누아 / 메디큐브 / 달바")
+        render_naver_datalab_tab(
+            tab_key="brand_compare",
+            keyword_groups=NAVER_DATALAB_TAB1,
+            default_start=default_start,
+            default_end=default_end,
+        )
+
+    with nd_tab2:
+        st.markdown("### 조선미녀 세부 키워드")
+        st.caption("조선미녀 / 조선미녀선크림 / 조선미녀선세럼 / 조선미녀맑은쌀선크림 / 조선미녀세럼")
+        render_naver_datalab_tab(
+            tab_key="boj_detail_keywords",
+            keyword_groups=NAVER_DATALAB_TAB2,
+            default_start=default_start,
+            default_end=default_end,
+        )
 
 # ══════════════════════════════════════════════════════════════
 # PAGE 2 — 리포트 대시보드
