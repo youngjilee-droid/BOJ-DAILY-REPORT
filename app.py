@@ -383,15 +383,231 @@ DASHBOARD_MEDIA_LIST = list(MEDIA_COL_MAP.keys())
 # ══════════════════════════════════════════════════════════════
 # 세션 상태 초기화
 # ══════════════════════════════════════════════════════════════
-if "media_data"        not in st.session_state: st.session_state.media_data        = {}
-if "media_warnings"    not in st.session_state: st.session_state.media_warnings    = {}
-if "raw_reports"       not in st.session_state: st.session_state.raw_reports       = {}
-if "converted_reports" not in st.session_state: st.session_state.converted_reports = {}
-if "comment_history"   not in st.session_state: st.session_state.comment_history   = []
-if "meta_api_df"       not in st.session_state: st.session_state.meta_api_df       = pd.DataFrame()
-# raw_reports      : {매체명: DataFrame(표준 REPORT_COLS)}  ← RAW 변환 결과 저장
-# converted_reports: {매체명: DataFrame(표준 REPORT_COLS)}  ← 다중 파일 취합 결과 저장
-# meta_api_df      : Meta API로 수집한 데이터 (RAW 변환 페이지에서 활용)
+if "media_data"          not in st.session_state: st.session_state.media_data          = {}
+if "media_warnings"      not in st.session_state: st.session_state.media_warnings      = {}
+if "raw_reports"         not in st.session_state: st.session_state.raw_reports         = {}
+if "converted_reports"   not in st.session_state: st.session_state.converted_reports   = {}
+if "comment_history"     not in st.session_state: st.session_state.comment_history     = []
+if "meta_api_df"         not in st.session_state: st.session_state.meta_api_df         = pd.DataFrame()
+if "advoost_product_df"  not in st.session_state: st.session_state.advoost_product_df  = pd.DataFrame()
+if "integrated_df"       not in st.session_state: st.session_state.integrated_df       = pd.DataFrame()
+
+# ══════════════════════════════════════════════════════════════
+# 영구 메모리 — comment_history를 JSON 파일에 저장/로드
+# Streamlit Cloud: /tmp/boj_history.json (재배포 시 초기화)
+# 로컬 실행: ./boj_history.json (영구 보존)
+# ══════════════════════════════════════════════════════════════
+import os, pathlib
+
+_HISTORY_FILE = pathlib.Path(
+    "/tmp/boj_history.json"
+    if (os.environ.get("STREAMLIT_SHARING_MODE") or os.path.exists("/mount/src"))
+    else "boj_history.json"
+)
+
+def _load_history():
+    if _HISTORY_FILE.exists():
+        try:
+            with open(_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                st.session_state.comment_history = data
+        except Exception:
+            pass
+
+def save_history():
+    """히스토리 변경 시 즉시 디스크에 저장 (앱 재시작 후에도 유지)"""
+    try:
+        with open(_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(st.session_state.comment_history, f,
+                      ensure_ascii=False, indent=2, default=str)
+    except Exception as e:
+        st.toast(f"히스토리 저장 실패: {e}", icon="⚠️")
+
+# 앱 시작 시 한 번만 로드
+if not st.session_state.comment_history:
+    _load_history()
+
+# ══════════════════════════════════════════════════════════════
+# ADVoost 상품-카테고리 인덱스 (앱 내 편집 가능)
+# 상품명에 포함된 키워드 → 카테고리 매핑
+# ══════════════════════════════════════════════════════════════
+ADVOOST_CATEGORY_INDEX = {
+    # ── 선케어 ─────────────────────────────────────────────
+    "맑은쌀선크림":      "선케어",
+    "아쿠아프레쉬":      "선케어",
+    "틴티드선세럼":      "선케어",
+    "인삼선세럼":        "선케어",
+    "산들쑥선스틱":      "선케어",
+    # ── 세럼·앰플 ───────────────────────────────────────────
+    "광채프로폴리스세럼": "세럼",
+    "쌀겨수맑은세럼":    "세럼",
+    "인삼스네일세럼":    "세럼",
+    "병풀비타세럼":      "세럼",
+    "산들녹차세럼":      "세럼",
+    "붉은팥 PDRN":       "세럼",
+    "PDRN":              "세럼",
+    # ── 크림 ────────────────────────────────────────────────
+    "조선미녀크림":      "크림",
+    # ── 토너·미스트 ─────────────────────────────────────────
+    "청매실 AHA BHA 토너": "토너",
+    "맑은쌀채운토너":    "토너",
+    "인삼 에센스워터":   "토너",
+    # ── 마스크·패드 ─────────────────────────────────────────
+    "맑은쌀꿀채운마스크": "마스크",
+    "붉은 팥 모공정화마스크": "마스크",
+    "병풀진정마스크":    "마스크",
+    "꽃담필링젤":        "마스크",
+    # ── 클렌저 ──────────────────────────────────────────────
+    "산뜻청매실클렌저":  "클렌저",
+    "인삼 클렌징오일":   "클렌저",
+    "미감클렌징밤":      "클렌저",
+    # ── 아이케어 ────────────────────────────────────────────
+    "인삼아이크림":      "아이케어",
+    # ── 키트·세트 ───────────────────────────────────────────
+    "에센셜 키트":       "키트/세트",
+    "기프트백":          "키트/세트",
+    "스킨케어 에센셜":   "키트/세트",
+    # ── 젤크림 ──────────────────────────────────────────────
+    "수분 워터 젤":      "젤크림",
+}
+
+def get_product_category(product_name: str) -> str:
+    """상품명에서 카테고리 추출 (인덱스 기반, 첫 번째 매칭)"""
+    for keyword, category in ADVOOST_CATEGORY_INDEX.items():
+        if keyword in product_name:
+            return category
+    return "기타"
+
+# ══════════════════════════════════════════════════════════════
+# ADVoost 상품별 RAW → 정제 DataFrame
+# 필요 컬럼: 상품명, 기간, 총비용, 노출수, 클릭수, 구매완료 수, 구매완료 전환매출액
+# ══════════════════════════════════════════════════════════════
+ADVOOST_PRODUCT_COLS = {
+    "상품명":           "상품명",
+    "기간":             "날짜",
+    "총비용":           "비용",
+    "노출수":           "노출",
+    "클릭수":           "클릭",
+    "구매완료 수":      "구매",
+    "구매완료 전환매출액": "매출액",
+}
+
+def load_advoost_product(file) -> pd.DataFrame:
+    """
+    ADVoost 상품별 성과 CSV → 정제 DataFrame 반환
+    - 필요 컬럼만 추출
+    - 날짜 파싱 (2026.04.05. 형식)
+    - 카테고리 컬럼 자동 추가
+    - VAT 제외 (총비용 / 1.1)
+    """
+    try:
+        if hasattr(file, "name") and file.name.endswith(".xlsx"):
+            df_raw = pd.read_excel(file, sheet_name=0)
+        else:
+            for enc in ["utf-8-sig", "cp949", "utf-8"]:
+                try:
+                    file.seek(0)
+                    df_raw = pd.read_csv(file, encoding=enc)
+                    break
+                except Exception:
+                    continue
+    except Exception as e:
+        return pd.DataFrame(), f"파일 읽기 실패: {e}"
+
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+    missing = [c for c in ADVOOST_PRODUCT_COLS if c not in df_raw.columns]
+    if missing:
+        return pd.DataFrame(), f"필수 컬럼 없음: {missing}"
+
+    df = df_raw[list(ADVOOST_PRODUCT_COLS.keys())].copy()
+    df = df.rename(columns=ADVOOST_PRODUCT_COLS)
+
+    # 날짜 파싱
+    def _parse(s):
+        s = str(s).strip().rstrip(".")
+        parts = s.replace("/", ".").split(".")
+        if len(parts) == 3:
+            return pd.to_datetime(f"{parts[0]}-{parts[1].zfill(2)}-{parts[2].zfill(2)}", errors="coerce")
+        return pd.to_datetime(s, errors="coerce")
+    df["날짜"] = df["날짜"].apply(_parse)
+
+    # 숫자 정규화
+    for col in ["비용", "노출", "클릭", "구매", "매출액"]:
+        df[col] = pd.to_numeric(
+            df[col].astype(str).str.replace(",", "").str.strip(),
+            errors="coerce").fillna(0)
+
+    # VAT 제외
+    df["비용"] = (df["비용"] / 1.1).round(2)
+
+    # 카테고리 추가
+    df["카테고리"] = df["상품명"].apply(get_product_category)
+
+    # 파생 KPI
+    df["CTR"]  = df.apply(lambda r: r["클릭"]/r["노출"]*100 if r["노출"] > 0 else 0, axis=1)
+    df["CVR"]  = df.apply(lambda r: r["구매"]/r["클릭"]*100 if r["클릭"] > 0 else 0, axis=1)
+    df["AOV"]  = df.apply(lambda r: r["매출액"]/r["구매"]   if r["구매"]  > 0 else 0, axis=1)
+    df["ROAS"] = df.apply(lambda r: r["매출액"]/r["비용"]*100 if r["비용"] > 0 else 0, axis=1)
+
+    df = df.sort_values(["날짜", "상품명"]).reset_index(drop=True)
+    return df, None
+
+# ══════════════════════════════════════════════════════════════
+# 요일별 코멘트 모드 자동 분기
+# 월요일(weekday=0): 이전주(월~일) vs 그전주 비교
+# 화~금(weekday=1~4): 전일 성과 + 전일 대비
+# ══════════════════════════════════════════════════════════════
+
+def get_comment_mode(target_date) -> str:
+    """
+    target_date 기준 코멘트 모드 반환
+    'weekly' : 월요일 → 이전주 vs 그전주
+    'daily'  : 화~금  → 전일 성과
+    """
+    if isinstance(target_date, datetime):
+        wd = target_date.weekday()
+    else:
+        wd = datetime.combine(target_date, datetime.min.time()).weekday()
+    return "weekly_compare" if wd == 0 else "daily"
+
+def get_week_range(target_dt: datetime):
+    """
+    월요일 기준 이전주/그전주 날짜 범위 반환
+    returns: (prev_week_start, prev_week_end, pprev_week_start, pprev_week_end)
+    """
+    # 이전주: target_dt가 월요일이면 직전 월~일
+    prev_mon = target_dt - timedelta(days=7)
+    prev_week_start = prev_mon - timedelta(days=prev_mon.weekday())  # 그 주 월요일
+    prev_week_end   = prev_week_start + timedelta(days=6)            # 그 주 일요일
+    pprev_week_start = prev_week_start - timedelta(days=7)
+    pprev_week_end   = prev_week_start - timedelta(days=1)
+    return prev_week_start, prev_week_end, pprev_week_start, pprev_week_end
+
+def build_topline_weekly(label, pw_kpi, ppw_kpi, pw_start, pw_end):
+    """
+    월요일 전용: 이전주 vs 그전주 탑라인 문자열 생성
+    pw_kpi  : 이전주 KPI dict
+    ppw_kpi : 그전주 KPI dict
+    """
+    def _diff(a, b, unit=""):
+        if b == 0: return ""
+        d = a - b
+        return f" ({d:+.0f}{unit} vs 전전주)"
+
+    date_range = f"{pw_start.strftime('%-m/%-d')}~{pw_end.strftime('%-m/%-d')}"
+    roas_pw  = pw_kpi.get("roas", 0)
+    roas_ppw = ppw_kpi.get("roas", 0)
+    roas_diff = f" (전전주 대비 ROAS {roas_pw-roas_ppw:+.0f}%p)" if roas_ppw > 0 else ""
+
+    out = f"* {label}\n"
+    out += (f"- {date_range} 주간 광고비 {fmt_won(pw_kpi['spend'])} 소진, "
+            f"구매 건수 {int(pw_kpi['purchase']):,}건 및 "
+            f"매출 {fmt_won(pw_kpi['revenue'])} 확보 "
+            f"(ROAS {pw_kpi.get('roas',0):.0f}%){roas_diff}\n")
+
+    # 누적(월간)은 호출하는 쪽에서 추가
+    return out
 
 # ══════════════════════════════════════════════════════════════
 # Meta API — facebook Graph API v25.0 연동
@@ -855,62 +1071,116 @@ CVR 전주: {cvr_w:.2f}% → 오늘: {cvr_t:.2f}% | AOV 전주: {aov_w:,.0f}원 
 
 
 def render_media_comment(mk, df_m, target_dt, prev_day_dt, month_start, week_start,
-                          rtype, api_key, note, all_comments):
+                          rtype, api_key, note, all_comments,
+                          comment_mode="daily",
+                          pw_start=None, pw_end=None,
+                          ppw_start=None, ppw_end=None,
+                          include_monthly=True):
     label = COMMENT_MEDIA_MAP[mk]["label"]
     landings_in_media = sorted(df_m["랜딩페이지"].dropna().unique().tolist())
     landings_in_media = [l for l in landings_in_media if l not in ("미분류", "nan", "")]
     has_multi_landing = len(landings_in_media) > 1
 
     def _render_block(df_sub, sub_label):
-        today_d = daily_agg(df_sub, target_dt)
-        if today_d["spend"] == 0 and today_d["purchase"] == 0 and today_d["revenue"] == 0:
-            return None, None
-        prev_d  = daily_agg(df_sub, prev_day_dt)
-        pw      = prev_week_avg(df_sub, target_dt)
-        monthly = period_agg(df_sub, month_start, target_dt)
-        weekly  = period_agg(df_sub, week_start, target_dt) if rtype in ["weekly", "both"] else None
+        # ── 주간 비교 모드 ─────────────────────────────────────
+        if comment_mode == "weekly_compare" and pw_start and pw_end:
+            pw_kpi  = period_agg(df_sub, pw_start, pw_end)
+            ppw_kpi = period_agg(df_sub, ppw_start, ppw_end) if ppw_start else \
+                      {"spend":0,"purchase":0,"revenue":0,"click":0,"impression":0,
+                       "roas":0,"ctr":0,"cvr":0,"aov":0}
+            monthly = period_agg(df_sub, month_start, target_dt) if include_monthly else None
 
-        roas_val = today_d.get("roas", 0)
-        ctr_val  = today_d.get("ctr",  0)
-        cvr_val  = today_d.get("cvr",  0)
-        aov_val  = today_d.get("aov",  0)
-        roas_pw  = pw.get("roas", 0) if pw else 0
+            if pw_kpi["spend"] == 0 and pw_kpi["purchase"] == 0:
+                return None, None
 
-        # ── KPI 메트릭 (2행: 기본 4개 + 세부 3개) ─────────────
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("광고비",   fmt_won(today_d["spend"]))
-        c2.metric("구매건수", f"{int(today_d['purchase']):,}건")
-        c3.metric("매출",     fmt_won(today_d["revenue"]))
-        c4.metric("ROAS",     f"{roas_val:.0f}%",
-                  delta=f"{roas_val - roas_pw:+.0f}%p vs 전주" if pw else None)
+            roas_pw = pw_kpi.get("roas",0); roas_ppw = ppw_kpi.get("roas",0)
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("이전주 광고비", fmt_won(pw_kpi["spend"]),
+                      delta=f"{(pw_kpi['spend']-ppw_kpi['spend'])/10000:+.0f}만 vs 전전주" if ppw_kpi["spend"] else None)
+            c2.metric("이전주 구매",   f"{int(pw_kpi['purchase']):,}건",
+                      delta=f"{int(pw_kpi['purchase']-ppw_kpi['purchase']):+,}건" if ppw_kpi["purchase"] else None)
+            c3.metric("이전주 매출",   fmt_won(pw_kpi["revenue"]))
+            c4.metric("이전주 ROAS",   f"{roas_pw:.0f}%",
+                      delta=f"{roas_pw-roas_ppw:+.0f}%p vs 전전주" if roas_ppw else None)
 
-        c5, c6, c7, _ = st.columns(4)
-        prev_ctr = prev_d.get("ctr", 0); prev_cvr = prev_d.get("cvr", 0)
-        prev_aov = prev_d.get("aov", 0)
-        c5.metric("CTR",  f"{ctr_val:.2f}%",
-                  delta=f"{ctr_val-prev_ctr:+.2f}%p vs 전일" if prev_d["spend"] > 0 else None)
-        c6.metric("CVR",  f"{cvr_val:.2f}%",
-                  delta=f"{cvr_val-prev_cvr:+.2f}%p vs 전일" if prev_d["spend"] > 0 else None)
-        c7.metric("AOV",  f"{aov_val/10000:.1f}만원" if aov_val >= 1000 else f"{aov_val:,.0f}원",
-                  delta=f"{(aov_val-prev_aov)/10000:+.1f}만원 vs 전일" if prev_d["spend"] > 0 else None)
+            c5,c6,c7,_ = st.columns(4)
+            c5.metric("CVR", f"{pw_kpi.get('cvr',0):.2f}%",
+                      delta=f"{pw_kpi.get('cvr',0)-ppw_kpi.get('cvr',0):+.2f}%p" if ppw_kpi["spend"] else None)
+            c6.metric("AOV", f"{pw_kpi.get('aov',0)/10000:.1f}만원" if pw_kpi.get("aov",0)>=1000
+                      else f"{pw_kpi.get('aov',0):,.0f}원")
+            c7.metric("CTR", f"{pw_kpi.get('ctr',0):.2f}%",
+                      delta=f"{pw_kpi.get('ctr',0)-ppw_kpi.get('ctr',0):+.2f}%p" if ppw_kpi["spend"] else None)
 
-        topline = build_topline(sub_label, target_dt, today_d, prev_d, pw, monthly, weekly, rtype)
+            topline = build_topline_weekly(sub_label, pw_kpi, ppw_kpi, pw_start, pw_end)
+            if include_monthly and monthly and monthly["spend"] > 0:
+                topline += (
+                    f"- {target_dt.month}월 누적 광고비 {fmt_won(monthly['spend'])} 소진, "
+                    f"구매 건수 {int(monthly['purchase']):,}건 및 "
+                    f"매출 {fmt_won(monthly['revenue'])} 확보 "
+                    f"(ROAS {fmt_roas(monthly['spend'],monthly['revenue'])})\n")
 
-        # ── 소재별 인사이트 추출 ───────────────────────────────
-        creative_insight = get_creative_insights(df_sub, target_dt, prev_day_dt, top_n=5)
+            # 소재 인사이트 (주간)
+            creative_insight = get_creative_insights(df_sub, pw_end, pw_start, top_n=5)
 
-        insight = ""
-        if api_key and today_d["spend"] > 0:
-            with st.spinner(f"{sub_label} AI 분석 중..."):
-                insight = gen_ai_insight(
-                    api_key, today_d,
-                    prev_d if prev_d["spend"] > 0 else
-                        {"spend":0,"purchase":0,"revenue":0,"click":0,"impression":0,
-                         "roas":0,"ctr":0,"cvr":0,"aov":0},
-                    pw if pw else
+            insight = ""
+            if api_key and pw_kpi["spend"] > 0:
+                with st.spinner(f"{sub_label} AI 분석 중..."):
+                    insight = gen_ai_insight(
+                        api_key, pw_kpi, ppw_kpi,
                         {"spend":0,"purchase":0,"revenue":0,"roas":0,"ctr":0,"cvr":0,"aov":0},
-                    sub_label, target_dt, note,
-                    creative_insight=creative_insight)
+                        sub_label, pw_end, note,
+                        creative_insight=creative_insight)
+
+        # ── 일간 모드 ──────────────────────────────────────────
+        else:
+            today_d = daily_agg(df_sub, target_dt)
+            if today_d["spend"] == 0 and today_d["purchase"] == 0 and today_d["revenue"] == 0:
+                return None, None
+
+            prev_d  = daily_agg(df_sub, prev_day_dt)
+            pw      = prev_week_avg(df_sub, target_dt)
+            monthly = period_agg(df_sub, month_start, target_dt) if include_monthly else None
+
+            roas_val = today_d.get("roas", 0)
+            ctr_val  = today_d.get("ctr",  0)
+            cvr_val  = today_d.get("cvr",  0)
+            aov_val  = today_d.get("aov",  0)
+            roas_pw  = pw.get("roas", 0) if pw else 0
+
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("광고비",   fmt_won(today_d["spend"]))
+            c2.metric("구매건수", f"{int(today_d['purchase']):,}건")
+            c3.metric("매출",     fmt_won(today_d["revenue"]))
+            c4.metric("ROAS",     f"{roas_val:.0f}%",
+                      delta=f"{roas_val-roas_pw:+.0f}%p vs 전주" if pw else None)
+
+            c5,c6,c7,_ = st.columns(4)
+            prev_ctr = prev_d.get("ctr",0); prev_cvr = prev_d.get("cvr",0)
+            prev_aov = prev_d.get("aov",0)
+            c5.metric("CTR", f"{ctr_val:.2f}%",
+                      delta=f"{ctr_val-prev_ctr:+.2f}%p vs 전일" if prev_d["spend"]>0 else None)
+            c6.metric("CVR", f"{cvr_val:.2f}%",
+                      delta=f"{cvr_val-prev_cvr:+.2f}%p vs 전일" if prev_d["spend"]>0 else None)
+            c7.metric("AOV", f"{aov_val/10000:.1f}만원" if aov_val>=1000 else f"{aov_val:,.0f}원",
+                      delta=f"{(aov_val-prev_aov)/10000:+.1f}만원 vs 전일" if prev_d["spend"]>0 else None)
+
+            topline = build_topline(sub_label, target_dt, today_d, prev_d, pw, monthly, None, "daily")
+
+            creative_insight = get_creative_insights(df_sub, target_dt, prev_day_dt, top_n=5)
+
+            insight = ""
+            if api_key and today_d["spend"] > 0:
+                with st.spinner(f"{sub_label} AI 분석 중..."):
+                    insight = gen_ai_insight(
+                        api_key, today_d,
+                        prev_d if prev_d["spend"]>0 else
+                            {"spend":0,"purchase":0,"revenue":0,"click":0,"impression":0,
+                             "roas":0,"ctr":0,"cvr":0,"aov":0},
+                        pw if pw else
+                            {"spend":0,"purchase":0,"revenue":0,"roas":0,"ctr":0,"cvr":0,"aov":0},
+                        sub_label, target_dt, note,
+                        creative_insight=creative_insight)
+
         full = topline + (insight + "\n" if insight else "")
         return full, f"[{sub_label}]\n{full}"
 
@@ -1060,180 +1330,12 @@ def make_agg_table(df, group_cols):
 
 
 # ══════════════════════════════════════════════════════════════
-# NAVER DataLab 검색어 트렌드 API
-# Streamlit Secrets: NAVER_DATALAB_CLIENT_ID, NAVER_DATALAB_CLIENT_SECRET
-# ══════════════════════════════════════════════════════════════
-NAVER_DATALAB_TAB1 = ["조선미녀", "라운드랩", "아누아", "메디큐브", "달바"]
-NAVER_DATALAB_TAB2 = ["조선미녀", "조선미녀선크림", "조선미녀선세럼", "조선미녀맑은쌀선크림", "조선미녀세럼"]
-NAVER_DATALAB_API_URL = "https://openapi.naver.com/v1/datalab/search"
-
-@st.cache_data(show_spinner=False, ttl=60 * 30)
-def fetch_naver_datalab_trend(start_date, end_date, time_unit, keyword_groups,
-                              device="", gender="", ages=None):
-    """
-    네이버 DataLab 검색어 트렌드 조회.
-    반환: (pivot_df, raw_df)
-      - pivot_df: index=period, columns=groupName, values=ratio
-      - raw_df  : period / 키워드 / ratio
-    """
-    ages = ages or []
-
-    try:
-        client_id = str(st.secrets["NAVER_DATALAB_CLIENT_ID"]).strip()
-        client_secret = str(st.secrets["NAVER_DATALAB_CLIENT_SECRET"]).strip()
-    except Exception:
-        raise RuntimeError(
-            "Streamlit Secrets에 NAVER_DATALAB_CLIENT_ID / NAVER_DATALAB_CLIENT_SECRET를 설정하세요."
-        )
-
-    body = {
-        "startDate": str(start_date),
-        "endDate": str(end_date),
-        "timeUnit": time_unit,
-        "keywordGroups": [{"groupName": kw, "keywords": [kw]} for kw in keyword_groups],
-    }
-    if device:
-        body["device"] = device
-    if gender:
-        body["gender"] = gender
-    if ages:
-        body["ages"] = ages
-
-    headers = {
-        "X-Naver-Client-Id": client_id,
-        "X-Naver-Client-Secret": client_secret,
-        "Content-Type": "application/json",
-    }
-
-    resp = requests.post(
-        NAVER_DATALAB_API_URL,
-        headers=headers,
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        timeout=30,
-    )
-
-    if resp.status_code != 200:
-        try:
-            err = resp.json()
-        except Exception:
-            err = resp.text
-        raise RuntimeError(f"NAVER DataLab API 오류 ({resp.status_code}): {err}")
-
-    payload = resp.json()
-    results = payload.get("results", [])
-    rows = []
-    for item in results:
-        title = item.get("title", "")
-        for point in item.get("data", []):
-            rows.append({
-                "period": point.get("period"),
-                "키워드": title,
-                "ratio": float(point.get("ratio", 0) or 0),
-            })
-
-    raw_df = pd.DataFrame(rows)
-    if raw_df.empty:
-        return pd.DataFrame(), pd.DataFrame(columns=["period", "키워드", "ratio"])
-
-    raw_df["period"] = pd.to_datetime(raw_df["period"], errors="coerce")
-    raw_df = raw_df.sort_values(["period", "키워드"]).reset_index(drop=True)
-    pivot_df = raw_df.pivot(index="period", columns="키워드", values="ratio").sort_index()
-    return pivot_df, raw_df
-
-
-def render_naver_datalab_tab(tab_key, keyword_groups, default_start, default_end):
-    st.caption("검색량 절대값이 아니라, 요청 기간 내 최고 시점을 100으로 둔 상대 지수입니다.")
-
-    c1, c2, c3 = st.columns([1.2, 1.2, 1])
-    with c1:
-        start_date = st.date_input(
-            "시작일", value=default_start, key=f"ndl_start_{tab_key}"
-        )
-    with c2:
-        end_date = st.date_input(
-            "종료일", value=default_end, key=f"ndl_end_{tab_key}"
-        )
-    with c3:
-        time_unit_label = st.selectbox(
-            "조회 단위", ["일간", "주간", "월간"], index=1, key=f"ndl_unit_{tab_key}"
-        )
-
-    c4, c5, c6 = st.columns([1, 1, 2])
-    with c4:
-        device_label = st.selectbox(
-            "디바이스", ["전체", "모바일", "PC"], index=0, key=f"ndl_device_{tab_key}"
-        )
-    with c5:
-        gender_label = st.selectbox(
-            "성별", ["전체", "여성", "남성"], index=0, key=f"ndl_gender_{tab_key}"
-        )
-    with c6:
-        age_options = {
-            "13~18세": "2", "19~24세": "3", "25~29세": "4", "30~34세": "5",
-            "35~39세": "6", "40~44세": "7", "45~49세": "8", "50~54세": "9",
-            "55~59세": "10", "60세 이상": "11"
-        }
-        age_labels = st.multiselect(
-            "연령", list(age_options.keys()), default=[], key=f"ndl_ages_{tab_key}"
-        )
-
-    if start_date > end_date:
-        st.warning("시작일이 종료일보다 늦습니다.")
-        return
-
-    time_unit_map = {"일간": "date", "주간": "week", "월간": "month"}
-    device_map = {"전체": "", "모바일": "mo", "PC": "pc"}
-    gender_map = {"전체": "", "여성": "f", "남성": "m"}
-    ages = [age_options[a] for a in age_labels]
-
-    try:
-        pivot_df, raw_df = fetch_naver_datalab_trend(
-            start_date=start_date,
-            end_date=end_date,
-            time_unit=time_unit_map[time_unit_label],
-            keyword_groups=keyword_groups,
-            device=device_map[device_label],
-            gender=gender_map[gender_label],
-            ages=ages,
-        )
-    except Exception as e:
-        st.error(str(e))
-        st.info(
-            "Secrets 예시: NAVER_DATALAB_CLIENT_ID / NAVER_DATALAB_CLIENT_SECRET"
-        )
-        return
-
-    if pivot_df.empty:
-        st.warning("조회 결과가 없습니다.")
-        return
-
-    st.markdown("##### 검색어 추이")
-    st.line_chart(pivot_df, height=380, use_container_width=True)
-
-    latest_dt = pivot_df.index.max()
-    latest_row = pivot_df.loc[latest_dt].fillna(0).sort_values(ascending=False)
-    latest_tbl = latest_row.reset_index()
-    latest_tbl.columns = ["키워드", "최신 지수"]
-    latest_tbl["기준일"] = pd.to_datetime(latest_dt).strftime("%Y-%m-%d")
-    latest_tbl["최신 지수"] = latest_tbl["최신 지수"].round(2)
-
-    st.markdown("##### 최신 시점 비교")
-    st.dataframe(latest_tbl[["기준일", "키워드", "최신 지수"]], hide_index=True, use_container_width=True)
-
-    with st.expander("원본 데이터 보기"):
-        show_df = raw_df.copy()
-        show_df["period"] = show_df["period"].dt.strftime("%Y-%m-%d")
-        show_df["ratio"] = show_df["ratio"].round(2)
-        st.dataframe(show_df.rename(columns={"period": "기간", "ratio": "검색지수"}),
-                     hide_index=True, use_container_width=True, height=320)
-
-# ══════════════════════════════════════════════════════════════
 # 사이드바 네비게이션
 # ══════════════════════════════════════════════════════════════
 with st.sidebar:
     st.title("📊 BOJ 광고 대시보드")
     page = st.radio("페이지",
-                    ["📝 코멘트 생성기", "📊 Sales 리포트", "🔎 네이버 데이터랩",
+                    ["📝 코멘트 생성기", "📊 Sales 리포트",
                      "📈 리포트 대시보드", "🔄 RAW 리포트 변환",
                      "🧠 코멘트 히스토리"],
                     label_visibility="collapsed")
@@ -1247,20 +1349,74 @@ if page == "📝 코멘트 생성기":
 
     with st.sidebar:
         st.subheader("⚙️ 설정")
-        api_key = st.text_input("OpenAI API Key", type="password", help="없으면 탑라인 멘트만 생성됩니다.")
+        api_key = st.text_input("OpenAI API Key", type="password",
+                                help="없으면 탑라인 멘트만 생성됩니다.")
         st.divider()
+
         st.subheader("📅 날짜")
-        target_date = st.date_input("리포트 날짜", value=datetime.today()-timedelta(days=1))
+        target_date = st.date_input("리포트 날짜",
+                                    value=datetime.today() - timedelta(days=1))
+        # 요일 자동 감지 → 모드 결정
+        _wd = datetime.combine(target_date, datetime.min.time()).weekday()
+        _wd_name = ["월","화","수","목","금","토","일"][_wd]
+        _auto_mode = "weekly_compare" if _wd == 0 else "daily"
+
+        if _auto_mode == "weekly_compare":
+            st.info(f"📅 {_wd_name}요일 → **주간 비교** 모드\n이전주 vs 그전주 성과 비교")
+        else:
+            st.info(f"📅 {_wd_name}요일 → **일간** 모드\n전일 성과 + 전일 대비")
+
+        # 수동 오버라이드 (필요시)
+        mode_override = st.checkbox("모드 수동 변경", value=False, key="mode_override")
+        if mode_override:
+            _manual = st.radio("코멘트 모드", ["일간 (전일 대비)","주간 비교 (이전주 vs 그전주)"],
+                               key="manual_mode")
+            comment_mode = "daily" if "일간" in _manual else "weekly_compare"
+        else:
+            comment_mode = _auto_mode
+
         st.divider()
         st.subheader("📺 매체")
         selected_media = st.multiselect(
             "코멘트 생성할 매체", options=list(COMMENT_MEDIA_MAP.keys()),
             default=["Meta","Naver BSA","Naver SSA","Naver ADVoost","TikTok"])
-        report_type = st.radio("리포트 유형", ["일간","주간+누적","일간+주간+누적"], index=0)
-        rtype = {"일간":"daily","주간+누적":"weekly","일간+주간+누적":"both"}[report_type]
+
+        # 일간 모드에서만 누적 포함 옵션 표시
+        if comment_mode == "daily":
+            include_monthly = st.checkbox("월 누적 포함", value=True, key="inc_monthly")
+        else:
+            include_monthly = True  # 주간 모드는 항상 월 누적 포함
+
+        st.divider()
+        st.subheader("🛍️ ADVoost 상품별 성과")
+        advoost_file = st.file_uploader(
+            "ADVoost 상품별 CSV 업로드",
+            type=["csv", "xlsx"],
+            key="advoost_product_upload",
+            label_visibility="collapsed",
+        )
+        if advoost_file:
+            df_ap, err_ap = load_advoost_product(advoost_file)
+            if err_ap:
+                st.error(f"ADVoost 파일 오류: {err_ap}")
+            else:
+                st.session_state.advoost_product_df = df_ap
+                dates_ap = df_ap["날짜"].dt.date.dropna()
+                st.success(f"✅ {len(df_ap):,}행 | {dates_ap.min()} ~ {dates_ap.max()}")
+                st.caption(f"상품 수: {df_ap['상품명'].nunique()}")
+
+        if not st.session_state.advoost_product_df.empty:
+            df_ap_cur = st.session_state.advoost_product_df
+            dates_ap = df_ap_cur["날짜"].dt.date.dropna()
+            st.caption(f"현재 로드: {dates_ap.min()} ~ {dates_ap.max()} / {len(df_ap_cur):,}행")
+            if st.button("🗑️ ADVoost 데이터 초기화", key="ap_reset",
+                         use_container_width=True):
+                st.session_state.advoost_product_df = pd.DataFrame()
+                st.rerun()
 
     st.title("📝 코멘트 생성기")
-    st.caption("최종 리포트 xlsx(Total_Raw 시트 포함)를 업로드하면 탑라인 멘트 + 랜딩별 특이사항을 자동 생성합니다.")
+    _mode_label = "주간 비교 (이전주 vs 그전주)" if comment_mode == "weekly_compare" else "일간 (전일 대비)"
+    st.caption(f"모드: **{_mode_label}** | 날짜: {target_date} ({_wd_name}요일)")
 
     uploaded = st.file_uploader("📂 최종 리포트 xlsx 업로드", type=["xlsx"])
     if not uploaded:
@@ -1307,17 +1463,28 @@ if page == "📝 코멘트 생성기":
         if not selected_media:
             st.warning("매체를 하나 이상 선택하세요.")
             st.stop()
+
         target_dt   = datetime.combine(target_date, datetime.min.time())
-        prev_day_dt = target_dt - timedelta(days=1)
         month_start = target_dt.replace(day=1)
-        week_start  = target_dt - timedelta(days=target_dt.weekday())
         all_comments = []
         prog = st.progress(0)
 
-        # ════════════════════════════════════════════════════
-        # Step 1 — 랜딩별 합산 탑라인 (네이버 브랜드스토어 / 올리브영)
-        # 매체 → 랜딩 매핑 (Total_Raw 랜딩페이지 컬럼 기준)
-        # ════════════════════════════════════════════════════
+        # ──────────────────────────────────────────────────────
+        # 모드별 날짜 범위 계산
+        # ──────────────────────────────────────────────────────
+        if comment_mode == "weekly_compare":
+            # 월요일: 이전주(월~일) vs 그전주(월~일)
+            pw_start, pw_end, ppw_start, ppw_end = get_week_range(target_dt)
+            rtype = "weekly"
+        else:
+            # 화~금: 전일 성과
+            prev_day_dt = target_dt - timedelta(days=1)
+            week_start  = target_dt - timedelta(days=target_dt.weekday())
+            rtype = "daily"
+
+        # ──────────────────────────────────────────────────────
+        # LANDING GROUPS 정의
+        # ──────────────────────────────────────────────────────
         LANDING_GROUPS = {
             "네이버 브랜드스토어": {
                 "label":   "Naver 브랜드 스토어 캠페인",
@@ -1330,14 +1497,15 @@ if page == "📝 코멘트 생성기":
                 "landing": ["올리브영"],
             },
         }
-
         has_landing_col = "랜딩페이지" in df_report.columns
 
         st.markdown("---")
         st.markdown("## 🏪 랜딩별 합산")
 
+        # ──────────────────────────────────────────────────────
+        # 랜딩별 합산 탑라인
+        # ──────────────────────────────────────────────────────
         for lg_key, lg_cfg in LANDING_GROUPS.items():
-            # 랜딩페이지 컬럼 있으면 그 기준, 없으면 매체명 기준으로 필터
             if has_landing_col:
                 df_lg = df_report[df_report["랜딩페이지"].isin(lg_cfg["landing"])]
             else:
@@ -1347,59 +1515,252 @@ if page == "📝 코멘트 생성기":
             if df_lg.empty:
                 continue
 
-            today_lg  = daily_agg(df_lg, target_dt)
-            if today_lg["spend"] == 0 and today_lg["purchase"] == 0:
-                continue
-
-            prev_lg   = daily_agg(df_lg, prev_day_dt)
-            pw_lg     = prev_week_avg(df_lg, target_dt)
-            monthly_lg = period_agg(df_lg, month_start, target_dt)
-            weekly_lg  = period_agg(df_lg, week_start, target_dt) if rtype in ["weekly","both"] else None
-
             st.markdown(f"### 🏷️ {lg_cfg['label']}")
-            # KPI 메트릭 (2행)
-            lc1, lc2, lc3, lc4 = st.columns(4)
-            roas_lg = today_lg.get("roas", 0); roas_pw_lg = pw_lg.get("roas",0) if pw_lg else 0
-            lc1.metric("광고비",   fmt_won(today_lg["spend"]))
-            lc2.metric("구매건수", f"{int(today_lg['purchase']):,}건")
-            lc3.metric("매출",     fmt_won(today_lg["revenue"]))
-            lc4.metric("ROAS",     f"{roas_lg:.0f}%",
-                       delta=f"{roas_lg-roas_pw_lg:+.0f}%p vs 전주" if pw_lg else None)
 
-            lc5, lc6, lc7, _ = st.columns(4)
-            lc5.metric("CTR", f"{today_lg.get('ctr',0):.2f}%")
-            lc6.metric("CVR", f"{today_lg.get('cvr',0):.2f}%")
-            aov_lg = today_lg.get("aov", 0)
-            lc7.metric("AOV", f"{aov_lg/10000:.1f}만원" if aov_lg >= 1000 else f"{aov_lg:,.0f}원")
+            if comment_mode == "weekly_compare":
+                # 이전주 / 그전주 집계
+                pw_kpi  = period_agg(df_lg, pw_start, pw_end)
+                ppw_kpi = period_agg(df_lg, ppw_start, ppw_end)
+                monthly = period_agg(df_lg, month_start, target_dt) if include_monthly else None
 
-            lg_topline = build_topline(
-                lg_cfg["label"], target_dt,
-                today_lg, prev_lg, pw_lg, monthly_lg, weekly_lg, rtype)
+                if pw_kpi["spend"] == 0 and pw_kpi["purchase"] == 0:
+                    continue
 
-            # 랜딩 합산 텍스트에어리어
-            st.text_area("합산 탑라인", value=lg_topline, height=130,
+                # 주간 KPI 메트릭 (이전주 vs 그전주)
+                lc1,lc2,lc3,lc4 = st.columns(4)
+                roas_pw = pw_kpi.get("roas",0); roas_ppw = ppw_kpi.get("roas",0)
+                lc1.metric("이전주 광고비", fmt_won(pw_kpi["spend"]),
+                           delta=fmt_won(pw_kpi["spend"]-ppw_kpi["spend"])+" vs 전전주" if ppw_kpi["spend"] else None)
+                lc2.metric("이전주 구매",   f"{int(pw_kpi['purchase']):,}건",
+                           delta=f"{int(pw_kpi['purchase']-ppw_kpi['purchase']):+,}건 vs 전전주" if ppw_kpi["purchase"] else None)
+                lc3.metric("이전주 매출",   fmt_won(pw_kpi["revenue"]))
+                lc4.metric("이전주 ROAS",   f"{roas_pw:.0f}%",
+                           delta=f"{roas_pw-roas_ppw:+.0f}%p vs 전전주" if roas_ppw else None)
+
+                lc5,lc6,lc7,_ = st.columns(4)
+                lc5.metric("CTR", f"{pw_kpi.get('ctr',0):.2f}%",
+                           delta=f"{pw_kpi.get('ctr',0)-ppw_kpi.get('ctr',0):+.2f}%p" if ppw_kpi["spend"] else None)
+                lc6.metric("CVR", f"{pw_kpi.get('cvr',0):.2f}%",
+                           delta=f"{pw_kpi.get('cvr',0)-ppw_kpi.get('cvr',0):+.2f}%p" if ppw_kpi["spend"] else None)
+                aov_lg = pw_kpi.get("aov",0)
+                lc7.metric("AOV", f"{aov_lg/10000:.1f}만원" if aov_lg >= 1000 else f"{aov_lg:,.0f}원")
+
+                lg_topline = build_topline_weekly(
+                    lg_cfg["label"], pw_kpi, ppw_kpi, pw_start, pw_end)
+                if include_monthly and monthly:
+                    lg_topline += (
+                        f"- {target_dt.month}월 누적 광고비 {fmt_won(monthly['spend'])} 소진, "
+                        f"구매 건수 {int(monthly['purchase']):,}건 및 "
+                        f"매출 {fmt_won(monthly['revenue'])} 확보 "
+                        f"(ROAS {fmt_roas(monthly['spend'],monthly['revenue'])})\n")
+
+            else:
+                # 일간 모드
+                today_lg  = daily_agg(df_lg, target_dt)
+                if today_lg["spend"] == 0 and today_lg["purchase"] == 0:
+                    continue
+                prev_lg   = daily_agg(df_lg, prev_day_dt)
+                pw_lg     = prev_week_avg(df_lg, target_dt)
+                monthly_lg = period_agg(df_lg, month_start, target_dt) if include_monthly else None
+
+                lc1,lc2,lc3,lc4 = st.columns(4)
+                roas_lg = today_lg.get("roas",0)
+                roas_pw_lg = pw_lg.get("roas",0) if pw_lg else 0
+                lc1.metric("광고비",   fmt_won(today_lg["spend"]))
+                lc2.metric("구매건수", f"{int(today_lg['purchase']):,}건")
+                lc3.metric("매출",     fmt_won(today_lg["revenue"]))
+                lc4.metric("ROAS",     f"{roas_lg:.0f}%",
+                           delta=f"{roas_lg-roas_pw_lg:+.0f}%p vs 전주" if pw_lg else None)
+
+                lc5,lc6,lc7,_ = st.columns(4)
+                prev_ctr = prev_lg.get("ctr",0); prev_cvr = prev_lg.get("cvr",0)
+                lc5.metric("CTR", f"{today_lg.get('ctr',0):.2f}%",
+                           delta=f"{today_lg.get('ctr',0)-prev_ctr:+.2f}%p vs 전일" if prev_lg["spend"] else None)
+                lc6.metric("CVR", f"{today_lg.get('cvr',0):.2f}%",
+                           delta=f"{today_lg.get('cvr',0)-prev_cvr:+.2f}%p vs 전일" if prev_lg["spend"] else None)
+                aov_lg = today_lg.get("aov",0)
+                lc7.metric("AOV", f"{aov_lg/10000:.1f}만원" if aov_lg >= 1000 else f"{aov_lg:,.0f}원")
+
+                lg_topline = build_topline(
+                    lg_cfg["label"], target_dt,
+                    today_lg, prev_lg, pw_lg, monthly_lg, None, "daily")
+
+            st.text_area("합산 탑라인", value=lg_topline, height=140,
                          key=f"landing_summary_{lg_key}")
             all_comments.append(f"[{lg_cfg['label']}]\n{lg_topline}")
+
+        # ──────────────────────────────────────────────────────
+        # ADVoost 상품별 성과 분석 섹션
+        # ──────────────────────────────────────────────────────
+        if not st.session_state.advoost_product_df.empty and "Naver ADVoost" in selected_media:
+            df_ap = st.session_state.advoost_product_df.copy()
+
+            st.markdown("---")
+            st.markdown("## 🛍️ ADVoost 상품별 성과")
+
+            if comment_mode == "weekly_compare":
+                df_ap_cur  = df_ap[(df_ap["날짜"].dt.date >= pw_start.date()) &
+                                   (df_ap["날짜"].dt.date <= pw_end.date())]
+                df_ap_prev = df_ap[(df_ap["날짜"].dt.date >= ppw_start.date()) &
+                                   (df_ap["날짜"].dt.date <= ppw_end.date())]
+                period_label = f"이전주 ({pw_start.strftime('%-m/%-d')}~{pw_end.strftime('%-m/%-d')})"
+            else:
+                df_ap_cur  = df_ap[df_ap["날짜"].dt.date == target_dt.date()]
+                df_ap_prev = df_ap[df_ap["날짜"].dt.date == prev_day_dt.date()]
+                period_label = f"{target_dt.strftime('%-m/%-d')} 전일"
+
+            if not df_ap_cur.empty:
+                # 상품별 집계
+                grp_cur = df_ap_cur.groupby(["상품명","카테고리"]).agg(
+                    비용=("비용","sum"), 노출=("노출","sum"), 클릭=("클릭","sum"),
+                    구매=("구매","sum"), 매출액=("매출액","sum")
+                ).reset_index()
+                grp_cur["ROAS"] = grp_cur.apply(lambda r: r["매출액"]/r["비용"]*100 if r["비용"]>0 else 0, axis=1)
+                grp_cur["AOV"]  = grp_cur.apply(lambda r: r["매출액"]/r["구매"] if r["구매"]>0 else 0, axis=1)
+                grp_cur["CVR"]  = grp_cur.apply(lambda r: r["구매"]/r["클릭"]*100 if r["클릭"]>0 else 0, axis=1)
+
+                # 전일/전전주 병합
+                if not df_ap_prev.empty:
+                    grp_prev = df_ap_prev.groupby("상품명").agg(
+                        구매_이전=("구매","sum"), 매출액_이전=("매출액","sum"), 비용_이전=("비용","sum")
+                    ).reset_index()
+                    grp_cur = grp_cur.merge(grp_prev, on="상품명", how="left")
+                    grp_cur["구매_이전"]  = grp_cur.get("구매_이전",  pd.Series([0]*len(grp_cur))).fillna(0)
+                    grp_cur["매출액_이전"] = grp_cur.get("매출액_이전", pd.Series([0]*len(grp_cur))).fillna(0)
+                    grp_cur["구매변화"] = grp_cur["구매"] - grp_cur["구매_이전"]
+                    grp_cur["매출변화"] = grp_cur["매출액"] - grp_cur["매출액_이전"]
+
+                # 카테고리별 탭
+                cats = sorted(grp_cur["카테고리"].unique())
+                cat_tabs = st.tabs([f"📦 {c}" for c in cats] + ["📊 전체"])
+
+                ap_insight_lines = [f"[ADVoost 상품별 성과 — {period_label}]"]
+
+                for ci, cat in enumerate(cats):
+                    with cat_tabs[ci]:
+                        df_cat = grp_cur[grp_cur["카테고리"] == cat].sort_values(
+                            "매출액", ascending=False)
+
+                        st.caption(f"카테고리: {cat} | {len(df_cat)}개 상품")
+
+                        # 요약 표
+                        disp_cols = ["상품명","비용","구매","매출액","ROAS","AOV","CVR"]
+                        if "매출변화" in df_cat.columns:
+                            disp_cols += ["구매변화","매출변화"]
+                        df_disp = df_cat[disp_cols].copy()
+                        df_disp["상품명"] = df_disp["상품명"].str[:25]
+                        df_disp["비용"]   = df_disp["비용"].apply(lambda v: f"{v/10000:.1f}만")
+                        df_disp["매출액"] = df_disp["매출액"].apply(lambda v: f"{v/10000:.1f}만")
+                        df_disp["ROAS"]   = df_disp["ROAS"].apply(lambda v: f"{v:.0f}%")
+                        df_disp["AOV"]    = df_disp["AOV"].apply(lambda v: f"{v/10000:.1f}만" if v>=1000 else f"{v:,.0f}")
+                        df_disp["CVR"]    = df_disp["CVR"].apply(lambda v: f"{v:.2f}%")
+                        st.dataframe(df_disp, use_container_width=True, hide_index=True, height=220)
+
+                        # 카테고리 인사이트 텍스트 생성
+                        top3 = df_cat.nlargest(3, "매출액")
+                        cat_line = f"  [{cat}] "
+                        parts = []
+                        for _, r in top3.iterrows():
+                            nm = str(r["상품명"])[:15]
+                            change = ""
+                            if "매출변화" in r and r.get("매출변화",0) != 0:
+                                change = f"(매출 {r['매출변화']/10000:+.1f}만)"
+                            parts.append(f"{nm} ROAS {r['ROAS']:.0f}% {change}")
+                        cat_line += " / ".join(parts)
+                        ap_insight_lines.append(cat_line)
+
+                # 전체 탭
+                with cat_tabs[-1]:
+                    df_all_disp = grp_cur.sort_values("매출액", ascending=False)
+                    st.dataframe(df_all_disp[["상품명","카테고리","비용","구매","매출액","ROAS","AOV"]],
+                                 use_container_width=True, hide_index=True, height=320)
+
+                # AI 프롬프트에 넣을 인사이트 텍스트
+                advoost_product_insight = "\n".join(ap_insight_lines)
+
+                # ADVoost AI 코멘트 생성
+                if api_key:
+                    with st.spinner("ADVoost 상품별 AI 분석 중..."):
+                        advoost_ai_comment = gen_ai_insight(
+                            api_key,
+                            period_agg(df_ap_cur, target_dt - timedelta(days=999), target_dt)
+                            if comment_mode == "weekly_compare"
+                            else daily_agg(df_ap[df_ap["날짜"].dt.date == target_dt.date()]
+                                           .assign(날짜=pd.to_datetime(df_ap[df_ap["날짜"].dt.date == target_dt.date()]["날짜"])),
+                                           target_dt)
+                            if False else {
+                                "spend": grp_cur["비용"].sum(),
+                                "purchase": grp_cur["구매"].sum(),
+                                "revenue": grp_cur["매출액"].sum(),
+                                "click": grp_cur["클릭"].sum(),
+                                "impression": grp_cur["노출"].sum(),
+                                "roas": grp_cur["매출액"].sum()/grp_cur["비용"].sum()*100 if grp_cur["비용"].sum() else 0,
+                                "ctr": grp_cur["클릭"].sum()/grp_cur["노출"].sum()*100 if grp_cur["노출"].sum() else 0,
+                                "cvr": grp_cur["구매"].sum()/grp_cur["클릭"].sum()*100 if grp_cur["클릭"].sum() else 0,
+                                "aov": grp_cur["매출액"].sum()/grp_cur["구매"].sum() if grp_cur["구매"].sum() else 0,
+                            },
+                            {"spend":0,"purchase":0,"revenue":0,"click":0,"impression":0,"roas":0,"ctr":0,"cvr":0,"aov":0},
+                            {"spend":0,"purchase":0,"revenue":0,"roas":0,"ctr":0,"cvr":0,"aov":0},
+                            "Naver ADVoost (상품별)",
+                            target_dt,
+                            creative_insight=advoost_product_insight,
+                        )
+                    st.text_area("ADVoost 상품별 AI 코멘트", value=advoost_ai_comment,
+                                 height=200, key="advoost_ai_comment")
+                    all_comments.append(f"[ADVoost 상품별]\n{advoost_ai_comment}\n")
 
         st.markdown("---")
         st.markdown("## 📺 매체별 상세")
 
-        # ════════════════════════════════════════════════════
-        # 매체별 코멘트 루프 (기존)
-        # ════════════════════════════════════════════════════
+        # ──────────────────────────────────────────────────────
+        # 매체별 코멘트 루프
+        # ──────────────────────────────────────────────────────
         for idx, mk in enumerate(selected_media):
             df_m = filter_media(df_report, mk)
             if len(df_m) == 0:
                 st.warning(f"{mk}: 데이터 없음")
                 prog.progress((idx+1)/len(selected_media))
                 continue
-            render_media_comment(mk, df_m, target_dt, prev_day_dt,
-                                 month_start, week_start, rtype, api_key,
-                                 notes.get(mk,""), all_comments)
+
+            if comment_mode == "weekly_compare":
+                render_media_comment(
+                    mk, df_m, target_dt, target_dt - timedelta(days=1),
+                    month_start, pw_start, "weekly", api_key,
+                    notes.get(mk,""), all_comments,
+                    comment_mode="weekly_compare",
+                    pw_start=pw_start, pw_end=pw_end,
+                    ppw_start=ppw_start, ppw_end=ppw_end,
+                    include_monthly=include_monthly,
+                )
+            else:
+                render_media_comment(
+                    mk, df_m, target_dt, prev_day_dt,
+                    month_start, week_start, "daily", api_key,
+                    notes.get(mk,""), all_comments,
+                    comment_mode="daily",
+                    include_monthly=include_monthly,
+                )
             prog.progress((idx+1)/len(selected_media))
+
         if all_comments:
             st.subheader("📋 전체 통합 (복사용)")
-            st.text_area("전체", value="\n\n".join(all_comments), height=500, key="all_comments")
+            full_text = "\n\n".join(all_comments)
+            st.text_area("전체", value=full_text, height=500, key="all_comments")
+
+            # 생성된 코멘트를 히스토리에 자동 저장
+            if st.button("💾 이 코멘트를 히스토리에 저장", key="save_to_history"):
+                entry = {
+                    "date":    str(target_date),
+                    "media":   "전체",
+                    "landing": "",
+                    "comment": full_text,
+                    "mode":    comment_mode,
+                }
+                st.session_state.comment_history.append(entry)
+                st.session_state.comment_history.sort(key=lambda x: x.get("date",""))
+                save_history()
+                st.success("✅ 히스토리에 저장 완료!")
+
         prog.empty()
 
 
@@ -1757,8 +2118,8 @@ elif page == "📊 Sales 리포트":
         chart_roas   = df_daily_chart["ROAS"].tolist()
 
         chart_html = f"""
-<div style="width:100%; height:430px; padding:12px 8px 28px 8px; box-sizing:border-box;">
-  <canvas id="salesChart"></canvas>
+<div style="width:100%;padding:8px 0">
+<canvas id="salesChart" height="80"></canvas>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
 <script>
@@ -1791,32 +2152,22 @@ new Chart(ctx, {{
     }},
     options: {{
         responsive: true,
-        maintainAspectRatio: false,
-        layout: {{
-            padding: {{ top: 8, right: 8, bottom: 24, left: 8 }}
-        }},
         interaction: {{ mode: 'index', intersect: false }},
         plugins: {{
-            legend: {{ position: 'bottom', labels: {{ font: {{ size: 11 }}, padding: 16, boxWidth: 12 }} }}
+            legend: {{ position: 'bottom', labels: {{ font: {{ size: 11 }} }} }}
         }},
         scales: {{
-            x: {{
-                ticks: {{ maxRotation: 45, minRotation: 45, font: {{ size: 10 }}, padding: 8 }},
-                grid: {{ display: true }}
-            }},
+            x: {{ ticks: {{ maxRotation: 45, font: {{ size: 10 }} }} }},
             y: {{
                 type: 'linear', position: 'left',
                 title: {{ display: true, text: '매출 (원)' }},
-                ticks: {{
-                    font: {{ size: 10 }},
-                    padding: 6,
-                    callback: v => v>=10000 ? (v/10000).toFixed(0)+'만' : v
-                }}
+                ticks: {{ font: {{ size: 10 }},
+                    callback: v => v>=10000 ? (v/10000).toFixed(0)+'만' : v }}
             }},
             y1: {{
                 type: 'linear', position: 'right',
                 title: {{ display: true, text: 'ROAS (%)' }},
-                ticks: {{ font: {{ size: 10 }}, padding: 6, callback: v => v+'%' }},
+                ticks: {{ font: {{ size: 10 }}, callback: v => v+'%' }},
                 grid: {{ drawOnChartArea: false }}
             }}
         }}
@@ -1824,7 +2175,7 @@ new Chart(ctx, {{
 }});
 </script>
 """
-        st.components.v1.html(chart_html, height=450)
+        st.components.v1.html(chart_html, height=360)
     except Exception as e:
         st.warning(f"차트 생성 오류: {e}")
 
@@ -1864,52 +2215,6 @@ new Chart(ctx, {{
     df_day_perf = make_display_df(day_rows).rename(columns={"Campaign":"Date"})
     st.dataframe(df_day_perf, use_container_width=True, height=420, hide_index=True)
 
-
-# ══════════════════════════════════════════════════════════════
-# PAGE — 네이버 데이터랩
-# ══════════════════════════════════════════════════════════════
-elif page == "🔎 네이버 데이터랩":
-
-    st.title("🔎 네이버 데이터랩 검색어 추이")
-    st.caption("네이버 DataLab API로 지정 키워드의 검색어 트렌드를 조회합니다.")
-
-    with st.sidebar:
-        st.subheader("🔐 NAVER DataLab API 설정")
-        st.caption("Streamlit Secrets에 아래 2개 값을 저장하세요.")
-        st.code(
-            """NAVER_DATALAB_CLIENT_ID = "YOUR_CLIENT_ID"
-NAVER_DATALAB_CLIENT_SECRET = "YOUR_CLIENT_SECRET""" ,
-            language="toml"
-        )
-
-    today = datetime.today().date()
-    default_start = max(today - timedelta(days=89), datetime(2016, 1, 1).date())
-    default_end = today
-
-    nd_tab1, nd_tab2 = st.tabs([
-        "브랜드 비교",
-        "조선미녀 세부 키워드",
-    ])
-
-    with nd_tab1:
-        st.markdown("### 브랜드 비교")
-        st.caption("조선미녀 / 라운드랩 / 아누아 / 메디큐브 / 달바")
-        render_naver_datalab_tab(
-            tab_key="brand_compare",
-            keyword_groups=NAVER_DATALAB_TAB1,
-            default_start=default_start,
-            default_end=default_end,
-        )
-
-    with nd_tab2:
-        st.markdown("### 조선미녀 세부 키워드")
-        st.caption("조선미녀 / 조선미녀선크림 / 조선미녀선세럼 / 조선미녀맑은쌀선크림 / 조선미녀세럼")
-        render_naver_datalab_tab(
-            tab_key="boj_detail_keywords",
-            keyword_groups=NAVER_DATALAB_TAB2,
-            default_start=default_start,
-            default_end=default_end,
-        )
 
 # ══════════════════════════════════════════════════════════════
 # PAGE 2 — 리포트 대시보드
