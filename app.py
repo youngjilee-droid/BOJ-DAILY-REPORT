@@ -3345,17 +3345,29 @@ elif page == "🔄 RAW 리포트 변환":
                         detection_log.append({"파일": f.name, "감지 매체": "❌ 감지 실패", "행수": len(df_raw), "컬럼 수": len(df_raw.columns)})
                         continue
 
-                    if detected not in TRANSFORM_MAP:
-                        errors.append(f"⚠️ `{f.name}` — {detected} 감지됐으나 변환 함수 미등록")
-                        detection_log.append({"파일": f.name, "감지 매체": f"⚠️ {detected} (미등록)", "행수": len(df_raw), "컬럼 수": len(df_raw.columns)})
-                        continue
+                    # 변환: TRANSFORM_MAP 우선, 없으면 standardize_raw_df 사용
+                    try:
+                        if detected in TRANSFORM_MAP:
+                            df_converted = TRANSFORM_MAP[detected](df_raw)
+                            # REPORT_COLS → INTEGRATED_COLS 형식으로 컬럼명 정규화
+                            df_converted = df_converted.rename(columns={
+                                "장바구니": "장바구니담기수",
+                                "동영상 조회": "동영상조회",
+                            })
+                            for col in INTEGRATED_COLS:
+                                if col not in df_converted.columns:
+                                    df_converted[col] = None
+                        else:
+                            # standardize_raw_df: PLATFORM_COL_MAPS 기반 전체 매체 지원
+                            df_converted = standardize_raw_df(df_raw, detected)
 
-                    # 변환
-                    df_converted = TRANSFORM_MAP[detected](df_raw)
-                    if detected not in results_by_media:
-                        results_by_media[detected] = []
-                    results_by_media[detected].append(df_converted)
-                    detection_log.append({"파일": f.name, "감지 매체": f"✅ {detected}", "행수": len(df_converted), "컬럼 수": len(df_raw.columns)})
+                        if detected not in results_by_media:
+                            results_by_media[detected] = []
+                        results_by_media[detected].append(df_converted)
+                        detection_log.append({"파일": f.name, "감지 매체": f"✅ {detected}", "행수": len(df_converted), "컬럼 수": len(df_raw.columns)})
+                    except Exception as e:
+                        errors.append(f"❌ `{f.name}` 변환 오류: {e}")
+                        detection_log.append({"파일": f.name, "감지 매체": f"⚠️ {detected} (변환 오류)", "행수": 0, "컬럼 수": len(df_raw.columns)})
 
                 except Exception as e:
                     errors.append(f"❌ `{f.name}` 오류: {e}")
@@ -3374,23 +3386,37 @@ elif page == "🔄 RAW 리포트 변환":
             # ── 매체별 취합 및 session_state 저장 ────────────────
             section("▣ 매체별 취합 결과")
             for media, dfs in results_by_media.items():
-                df_merged = pd.concat(dfs, ignore_index=True).sort_values(
+                df_merged = pd.concat(dfs, ignore_index=True)
+
+                # 날짜 컬럼 타입 통일
+                df_merged["날짜"] = pd.to_datetime(df_merged["날짜"], errors="coerce")
+
+                df_merged = df_merged.sort_values(
                     ["날짜", "캠페인명", "광고그룹명", "광고명"]
                 ).reset_index(drop=True)
 
-                # 기존 데이터와 병합 (중복 제거)
+                # converted_reports에 저장 (REPORT_COLS 기준으로 통일)
+                df_for_store = df_merged.rename(columns={
+                    "장바구니담기수": "장바구니",
+                    "동영상조회": "동영상 조회",
+                }).copy()
+                for col in REPORT_COLS:
+                    if col not in df_for_store.columns:
+                        df_for_store[col] = None
+                df_for_store = df_for_store[REPORT_COLS]
+
                 if media in st.session_state.converted_reports:
                     existing = st.session_state.converted_reports[media]
-                    df_merged = pd.concat([existing, df_merged], ignore_index=True).drop_duplicates(
+                    df_for_store = pd.concat([existing, df_for_store], ignore_index=True).drop_duplicates(
                         subset=["날짜", "캠페인명", "광고그룹명", "광고명"]
                     ).sort_values(["날짜", "캠페인명", "광고그룹명", "광고명"]).reset_index(drop=True)
 
-                st.session_state.converted_reports[media] = df_merged
+                st.session_state.converted_reports[media] = df_for_store
 
-                dates = pd.to_datetime(df_merged["날짜"], errors="coerce").dt.date.dropna()
+                dates = pd.to_datetime(df_for_store["날짜"], errors="coerce").dt.date.dropna()
                 dr = f"{dates.min()} ~ {dates.max()}" if not dates.empty else "날짜 없음"
                 mc1, mc2, mc3 = st.columns([2, 2, 4])
-                mc1.metric(media, f"{len(df_merged):,}행")
+                mc1.metric(media, f"{len(df_for_store):,}행")
                 mc2.metric("날짜 범위", dr)
                 mc3.metric("파일 수", f"{len(dfs)}개")
 
@@ -3408,8 +3434,9 @@ elif page == "🔄 RAW 리포트 변환":
 
             # ── 미리보기 ──────────────────────────────────────────
             section("▣ 통합 데이터 미리보기")
-            preview_cols = ["날짜", "매체"] + [c for c in REPORT_COLS if c != "날짜"]
-            st.dataframe(df_total[preview_cols].head(50), use_container_width=True, height=280, hide_index=True)
+            preview_cols = ["날짜", "매체"] + [c for c in REPORT_COLS if c not in ("날짜", "매체")]
+            avail_preview = [c for c in preview_cols if c in df_total.columns]
+            st.dataframe(df_total[avail_preview].head(50), use_container_width=True, height=280, hide_index=True)
 
             # ── KPI 요약 ──────────────────────────────────────────
             section("▣ 날짜 × 매체별 KPI 요약")
