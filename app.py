@@ -231,27 +231,33 @@ TRANSFORM_MAP = {
 # 각 매체 RAW 파일에만 존재하는 컬럼명 집합 (1개 이상 일치 시 해당 매체로 판별)
 # 우선순위: 리스트 앞쪽이 높음 (더 구체적인 매체를 먼저 배치)
 MEDIA_SIGNATURES = [
+    # ── 고유 컬럼이 명확한 매체를 먼저 배치 (우선순위 높음) ──
     ("Naver ADVoost", ["애셋 그룹 이름", "총 비용", "구매완료수", "구매완료 전환 매출액"]),
+    # TikTok: '일별', '클릭수(목적지)', '총 구매 수(모든 채널)', '광고 그룹 이름' 고유 컬럼
+    ("TikTok",        ["일별", "클릭수(목적지)", "총 구매 수(모든 채널)", "광고 그룹 이름"]),
+    # Kakao 고유 컬럼
+    ("Kakao",         ["청구금액", "광고그룹", "구매금액", "캠페인 유형"]),
+    # Meta는 마지막 — '캠페인 이름'이 타 매체와 겹치므로 다른 매체가 먼저 걸러진 뒤 처리
     ("Meta",          ["지출 금액 (KRW)", "광고 세트 이름", "캠페인 이름"]),
-    # 추후 추가 예시:
-    # ("TikTok",   ["캠페인", "광고그룹", "완료된 결제"]),
-    # ("Kakao",    ["청구금액", "광고그룹명", "구매금액"]),
-    # ("Naver SSA",["캠페인명", "전환수", "전환매출"]),
+    # Naver SSA/BSA
+    ("Naver SSA",     ["총비용(vat포함,원)", "총 전환수", "총 전환매출액(원)"]),
+    ("Naver BSA",     ["총비용(vat포함,원)", "전환구매", "총전환매출액(원)"]),
 ]
 
 def detect_media(df_raw):
     """
-    RAW DataFrame의 컬럼명을 보고 매체를 자동 감지
-    MEDIA_SIGNATURES의 고유 컬럼 중 가장 많이 일치하는 매체 반환
-    일치 없으면 None 반환
+    RAW DataFrame의 컬럼명을 보고 매체를 자동 감지.
+    MEDIA_SIGNATURES 순서가 우선순위 — 점수 동점 시 앞쪽 매체 선택.
+    최소 1개 시그니처 컬럼이 일치해야 감지로 인정.
     """
     cols = set(str(c).strip() for c in df_raw.columns)
     best_media, best_score = None, 0
     for media, sig_cols in MEDIA_SIGNATURES:
         score = sum(1 for c in sig_cols if c in cols)
+        # 동점이면 리스트 앞쪽(우선순위 높음)이 이미 best_media에 설정돼 있으므로
+        # 엄격히 '>'로만 갱신 (동점 시 갱신 안 함 → 앞쪽 매체 유지)
         if score > best_score:
             best_media, best_score = media, score
-    # 최소 1개 이상 일치해야 감지로 인정
     return best_media if best_score >= 1 else None
 
 # ══════════════════════════════════════════════════════════════
@@ -294,21 +300,46 @@ PLATFORM_COL_MAPS = {
         "video plays": "동영상조회", "video views": "동영상조회",
     },
     "TikTok": {
-        "date": "날짜", "By day": "날짜", "stat_time_day": "날짜", "날짜": "날짜",
-        "Campaign name": "캠페인명", "campaign": "캠페인명",
-        "Ad group name": "광고그룹명", "adgroup name": "광고그룹명", "ad group": "광고그룹명",
-        "Ad name": "광고명", "ad": "광고명",
-        "spend": "비용", "Cost": "비용", "amount spent": "비용", "지출 금액": "비용",
-        "노출": "노출", "Impressions": "노출",
-        "Clicks (destination)": "클릭", "clicks": "클릭", "클릭": "클릭",
-        "Total purchase (all-channels)": "구매", "purchase": "구매",
-        "purchases": "구매", "complete payment": "구매",
-        "purchase value": "매출액", "complete payment value": "매출액", "conversion value": "매출액",
-        "add to cart": "장바구니담기수", "Total add to cart (all-channels)": "장바구니담기수",
-        "Reach": "도달", "도달": "도달",
+        # 날짜 — TikTok 협력광고는 '일별'
+        "일별": "날짜", "date": "날짜", "By day": "날짜",
+        "stat_time_day": "날짜", "날짜": "날짜",
+        # 캠페인·그룹·소재
+        "캠페인 이름": "캠페인명", "Campaign name": "캠페인명", "campaign": "캠페인명",
+        "광고 그룹 이름": "광고그룹명", "Ad group name": "광고그룹명",
+        "adgroup name": "광고그룹명", "ad group": "광고그룹명",
+        "광고 이름": "광고명", "Ad name": "광고명", "ad": "광고명",
+        # 비용
+        "비용": "비용", "spend": "비용", "Cost": "비용",
+        "amount spent": "비용", "지출 금액": "비용",
+        # 노출
+        "노출수": "노출", "노출": "노출", "Impressions": "노출",
+        # 클릭 — TikTok 협력광고는 '클릭수(목적지)'
+        "클릭수(목적지)": "클릭", "클릭수": "클릭",
+        "Clicks (destination)": "클릭", "clicks": "클릭",
+        # 구매 — TikTok 협력광고는 '총 구매 수(모든 채널)'
+        "총 구매 수(모든 채널)": "구매",
+        "Total purchase (all-channels)": "구매",
+        "purchase": "구매", "purchases": "구매",
+        "complete payment": "구매",
+        # 매출액
+        "총 구매액(모든 채널)": "매출액",
+        "purchase value": "매출액",
+        "complete payment value": "매출액",
+        "conversion value": "매출액",
+        # 장바구니 — TikTok 협력광고는 '총 장바구니에 담기 수(모든 채널)'
+        "총 장바구니에 담기 수(모든 채널)": "장바구니담기수",
+        "add to cart": "장바구니담기수",
+        "Total add to cart (all-channels)": "장바구니담기수",
+        # 도달
+        "도달": "도달", "Reach": "도달",
+        # 참여
         "engagement": "참여", "engaged view": "참여",
+        # 팔로우
         "follows": "팔로우", "followers": "팔로우",
-        "Video views": "동영상조회", "동영상 조회": "동영상조회",
+        # 동영상 조회
+        "동영상 조회수": "동영상조회", "동영상 조회": "동영상조회",
+        "Video views": "동영상조회", "video views at 2s": "동영상조회",
+        "video views at 6s": "동영상조회",
     },
     "Kakao": {
         "날짜": "날짜", "일자": "날짜", "일": "날짜",
@@ -481,16 +512,19 @@ MEDIA_COL_MAP = {
         "landing":    ["랜딩페이지", "Landing page"],
     },
     "TikTok": {
-        "date":       ["날짜", "Date", "일자"],
-        "campaign":   ["캠페인", "Campaign Name"],
-        "adgroup":    ["광고그룹", "Ad Group Name"],
-        "ad":         ["광고", "Ad Name"],
-        "spend":      ["비용", "Cost", "Spend"],
-        "impression": ["노출수", "Impressions"],
-        "click":      ["클릭수", "Clicks"],
-        "purchase":   ["완료된 결제", "구매", "Complete Payment"],
-        "revenue":    ["완료된 결제 가치", "매출", "Complete Payment Value"],
-        "cart":       ["장바구니 담기", "Add to Cart"],
+        "date":       ["일별", "날짜", "Date", "일자", "stat_time_day", "By day"],
+        "campaign":   ["캠페인 이름", "캠페인", "Campaign Name", "campaign"],
+        "adgroup":    ["광고 그룹 이름", "광고그룹", "Ad Group Name", "Ad group name"],
+        "ad":         ["광고 이름", "광고", "Ad Name"],
+        "spend":      ["비용", "Cost", "Spend", "spend"],
+        "impression": ["노출수", "노출", "Impressions"],
+        "click":      ["클릭수(목적지)", "클릭수", "Clicks (destination)", "Clicks"],
+        "purchase":   ["총 구매 수(모든 채널)", "Total purchase (all-channels)",
+                       "완료된 결제", "Complete Payment", "purchase", "구매"],
+        "revenue":    ["총 구매액(모든 채널)", "완료된 결제 가치",
+                       "Complete Payment Value", "purchase value"],
+        "cart":       ["총 장바구니에 담기 수(모든 채널)",
+                       "Total add to cart (all-channels)", "Add to Cart"],
         "landing":    ["랜딩페이지", "Landing page"],
     },
     "Kakao": {
