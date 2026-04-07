@@ -239,8 +239,9 @@ MEDIA_SIGNATURES = [
     ("Kakao",         ["청구금액", "광고그룹", "구매금액", "캠페인 유형"]),
     # Meta는 마지막 — '캠페인 이름'이 타 매체와 겹치므로 다른 매체가 먼저 걸러진 뒤 처리
     ("Meta",          ["지출 금액 (KRW)", "광고 세트 이름", "캠페인 이름"]),
-    # Naver SSA/BSA
-    ("Naver SSA",     ["총비용(vat포함,원)", "총 전환수", "총 전환매출액(원)"]),
+    # Naver SSA — 실제 파일: 일별/캠페인/광고그룹/소재/총비용/노출수/클릭수/구매완료/전환매출액(원)
+    ("Naver SSA",     ["일별", "캠페인", "광고그룹", "총비용", "전환매출액(원)"]),
+    # Naver BSA — 고유 컬럼(전환구매 등) 기반 유지, 폴백으로 SSA 안 잡히는 경우 처리
     ("Naver BSA",     ["총비용(vat포함,원)", "전환구매", "총전환매출액(원)"]),
 ]
 
@@ -358,20 +359,41 @@ PLATFORM_COL_MAPS = {
         "동영상조회": "동영상조회", "동영상 조회": "동영상조회",
     },
     "Naver SSA": {
-        "일별": "날짜", "캠페인": "캠페인명", "광고그룹": "광고그룹명",
-        "광고그룹명": "광고그룹명", "소재": "광고명", "광고명": "광고명",
-        "총비용(vat포함,원)": "비용", "총비용": "비용", "소진액": "비용", "비용": "비용",
-        "노출": "노출", "노출수": "노출", "클릭": "클릭", "클릭수": "클릭",
+        # 날짜
+        "일별": "날짜",
+        # 캠페인 — 변환 후 캠페인명으로 매핑 (MO/PC 제거 + 연월 prefix는 후처리)
+        "캠페인": "캠페인명",
+        # 광고그룹
+        "광고그룹": "광고그룹명", "광고그룹명": "광고그룹명",
+        # 소재(광고명)
+        "소재": "광고명", "광고명": "광고명",
+        # 비용 — 실제 파일 컬럼명 '총비용'
+        "총비용": "비용", "총비용(vat포함,원)": "비용", "소진액": "비용", "비용": "비용",
+        # 노출·클릭
+        "노출수": "노출", "노출": "노출",
+        "클릭수": "클릭", "클릭": "클릭",
+        # 구매 — 실제 파일 컬럼명 '구매완료'
+        "구매완료": "구매",
         "총 전환수": "구매", "총전환수": "구매", "전환구매": "구매",
+        # 매출 — 실제 파일 컬럼명 '전환매출액(원)'
+        "전환매출액(원)": "매출액",
+        "구매완료 전환매출액(원)": "매출액",
         "총 전환매출액(원)": "매출액", "총전환매출액(원)": "매출액",
+        # 장바구니
         "장바구니": "장바구니담기수", "장바구니담기": "장바구니담기수",
     },
     "Naver BSA": {
-        "일별": "날짜", "캠페인": "캠페인명", "광고그룹": "광고그룹명",
-        "광고그룹명": "광고그룹명", "소재": "광고명", "광고명": "광고명",
-        "총비용(vat포함,원)": "비용", "총비용": "비용", "소진액": "비용", "비용": "비용",
-        "노출": "노출", "노출수": "노출", "클릭": "클릭", "클릭수": "클릭",
+        "일별": "날짜",
+        "캠페인": "캠페인명",
+        "광고그룹": "광고그룹명", "광고그룹명": "광고그룹명",
+        "소재": "광고명", "광고명": "광고명",
+        "총비용": "비용", "총비용(vat포함,원)": "비용", "소진액": "비용", "비용": "비용",
+        "노출수": "노출", "노출": "노출",
+        "클릭수": "클릭", "클릭": "클릭",
+        "구매완료": "구매",
         "총 전환수": "구매", "총전환수": "구매", "전환구매": "구매",
+        "전환매출액(원)": "매출액",
+        "구매완료 전환매출액(원)": "매출액",
         "총 전환매출액(원)": "매출액", "총전환매출액(원)": "매출액",
         "장바구니": "장바구니담기수", "장바구니담기": "장바구니담기수",
     },
@@ -483,6 +505,28 @@ def standardize_raw_df(df_raw: pd.DataFrame, platform: str) -> pd.DataFrame:
         return pd.to_datetime(s, errors="coerce")
 
     df["날짜"] = df["날짜"].apply(_parse_date)
+
+    # ── Naver SSA / BSA 전용: 캠페인명 변환 ───────────────────
+    # 규칙: SSA_PC → 2604_SSA (날짜의 연월 prefix + MO/PC 제거)
+    if platform in ("Naver SSA", "Naver BSA"):
+        import re as _re
+
+        def _transform_naver_campaign(row):
+            """날짜 기반 연월 prefix + MO/PC 제거"""
+            raw = str(row.get("캠페인명", "")).strip()
+            dt  = row.get("날짜")
+            # 날짜에서 연월 추출
+            if pd.notna(dt) and hasattr(dt, "year"):
+                prefix = f"{str(dt.year)[-2:]}{str(dt.month).zfill(2)}"
+            else:
+                prefix = ""
+            # _MO / _PC / -MO / -PC (대소문자 무관) 맨 뒤에서 제거
+            name = _re.sub(r"[_\-](MO|PC)$", "", raw, flags=_re.IGNORECASE)
+            return f"{prefix}_{name}" if prefix and name else (name or raw)
+
+        df["캠페인명"] = df.apply(_transform_naver_campaign, axis=1)
+        # 매체명도 'Naver'로 통일 (SSA/BSA 구분 없이 하나의 매체로 표시하려면 아래 주석 해제)
+        # df["매체"] = "Naver"
 
     # 네이버 VAT 제외
     if platform in NAVER_PLATFORMS:
@@ -2946,17 +2990,19 @@ elif page == "🔄 RAW 리포트 변환":
                 )
                 if up_file:
                     try:
+                        NAVER_SKIP = ["Naver SSA", "Naver BSA"]
                         if up_file.name.endswith(".csv"):
                             for enc in ["utf-8-sig", "cp949", "utf-8"]:
                                 try:
                                     up_file.seek(0)
-                                    df_raw_m = pd.read_csv(up_file, encoding=enc)
+                                    skip = 1 if platform in NAVER_SKIP else 0
+                                    df_raw_m = pd.read_csv(up_file, encoding=enc, skiprows=skip)
                                     break
                                 except Exception:
                                     continue
                         else:
-                            # 네이버 계열은 1행 스킵
-                            skip = 1 if platform in ["Naver SSA", "Naver BSA"] else 0
+                            # 네이버 계열은 1행(제목 행) 스킵
+                            skip = 1 if platform in NAVER_SKIP else 0
                             df_raw_m = pd.read_excel(up_file, sheet_name=0, skiprows=skip)
 
                         df_std = standardize_raw_df(df_raw_m, platform)
@@ -3333,12 +3379,40 @@ elif page == "🔄 RAW 리포트 변환":
 
             for f in all_files:
                 try:
-                    df_raw = (pd.read_csv(f, encoding="utf-8-sig")
-                              if f.name.endswith(".csv") else pd.read_excel(f, sheet_name=0))
+                    # ① 1차 로드 (skiprows 없이) → 매체 자동 감지
+                    if f.name.endswith(".csv"):
+                        for enc in ["utf-8-sig", "cp949", "utf-8"]:
+                            try:
+                                f.seek(0)
+                                df_raw = pd.read_csv(f, encoding=enc)
+                                break
+                            except Exception:
+                                continue
+                    else:
+                        f.seek(0)
+                        df_raw = pd.read_excel(f, sheet_name=0)
                     df_raw.columns = [str(c).strip() for c in df_raw.columns]
 
-                    # 매체 자동 감지
+                    # ② 매체 자동 감지
                     detected = detect_media(df_raw)
+
+                    # ③ Naver 계열: 첫 행이 제목 행이므로 skiprows=1로 재로드
+                    NAVER_SKIPROWS_LIST = ["Naver SSA", "Naver BSA"]
+                    if detected in NAVER_SKIPROWS_LIST:
+                        if f.name.endswith(".csv"):
+                            for enc in ["utf-8-sig", "cp949", "utf-8"]:
+                                try:
+                                    f.seek(0)
+                                    df_raw = pd.read_csv(f, encoding=enc, skiprows=1)
+                                    break
+                                except Exception:
+                                    continue
+                        else:
+                            f.seek(0)
+                            df_raw = pd.read_excel(f, sheet_name=0, skiprows=1)
+                        df_raw.columns = [str(c).strip() for c in df_raw.columns]
+                        # skiprows 후 재감지 (컬럼 확인)
+                        detected = detect_media(df_raw) or detected
 
                     if detected is None:
                         errors.append(f"❌ `{f.name}` — 매체 감지 실패 (알 수 없는 컬럼 구조)")
