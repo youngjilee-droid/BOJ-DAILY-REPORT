@@ -3233,10 +3233,17 @@ elif page == "🔄 RAW 리포트 변환":
             st.markdown("**현재 자동 감지 가능한 매체:**")
             sig_rows = []
             for media, sig_cols in MEDIA_SIGNATURES:
+                # TRANSFORM_MAP 전용 함수 or PLATFORM_COL_MAPS 기반 표준화 모두 "지원"
+                if media in TRANSFORM_MAP:
+                    support_status = "✅ 전용 변환 함수"
+                elif media in PLATFORM_COL_MAPS:
+                    support_status = "✅ 표준 매핑 지원"
+                else:
+                    support_status = "❌ 미지원"
                 sig_rows.append({
                     "매체": media,
                     "자동 감지 기준 컬럼": " / ".join(sig_cols),
-                    "변환 함수": "✅ 등록됨" if media in TRANSFORM_MAP else "❌ 미등록",
+                    "변환 방식": support_status,
                 })
             st.dataframe(pd.DataFrame(sig_rows), use_container_width=True, hide_index=True)
 
