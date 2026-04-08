@@ -540,9 +540,171 @@ def standardize_raw_df(df_raw: pd.DataFrame, platform: str) -> pd.DataFrame:
     df["매체"] = platform
     return df.sort_values("날짜").reset_index(drop=True)
 
+
 # ══════════════════════════════════════════════════════════════
-# 대시보드용 매체별 RAW 컬럼 매핑 (기존 대시보드 뷰용)
+# Naver 소재 인덱스 VLOOKUP + 전환유형별 RD 처리
 # ══════════════════════════════════════════════════════════════
+
+def load_naver_file_auto(file) -> pd.DataFrame:
+    """
+    네이버 RD 파일 로드 (첫 행 제목 자동 스킵).
+    CSV / xlsx 모두 지원.
+    """
+    if file.name.endswith(".csv"):
+        for enc in ["utf-8-sig", "cp949", "utf-8", "euc-kr"]:
+            try:
+                file.seek(0)
+                df = pd.read_csv(file, encoding=enc, sep=None, engine="python", skiprows=1)
+                df.columns = [str(c).strip() for c in df.columns]
+                return df
+            except Exception:
+                continue
+    else:
+        file.seek(0)
+        df = pd.read_excel(file, sheet_name=0, skiprows=1)
+        df.columns = [str(c).strip() for c in df.columns]
+        return df
+    return pd.DataFrame()
+
+
+def apply_creative_index(df: pd.DataFrame,
+                          idx: pd.DataFrame) -> pd.DataFrame:
+    """
+    소재 컬럼(nad로 시작)을 인덱스 테이블로 VLOOKUP → 한글상품명으로 대체.
+    - df: 표준화된 DataFrame (광고명 컬럼 보유)
+    - idx: st.session_state.naver_creative_index
+    반환: 광고명이 한글로 대체된 DataFrame
+    """
+    if idx.empty or "소재ID(nad)" not in idx.columns:
+        return df
+    df = df.copy()
+    ad_col = next((c for c in ["광고명", "소재명"] if c in df.columns), None)
+    if ad_col is None:
+        return df
+
+    # nad → 한글상품명 딕셔너리
+    lookup = dict(zip(
+        idx["소재ID(nad)"].astype(str).str.strip(),
+        idx["한글상품명"].astype(str).str.strip()
+    ))
+
+    def _replace(v):
+        v_str = str(v).strip()
+        if v_str.startswith("nad"):
+            return lookup.get(v_str, v_str)
+        return v_str
+
+    df[ad_col] = df[ad_col].apply(_replace)
+    return df
+
+
+def parse_naver_conv_rd(file) -> pd.DataFrame:
+    """
+    전환유형별 RD 파일 파싱.
+    컬럼: 일별, 캠페인, 광고그룹, 소재, 전환 유형, 총 전환수, 총 전환 출액(원)
+    - 첫 행 = 제목 행 → skiprows=1
+    - '장바구니' 전환 유형만 필터
+    반환: DataFrame(날짜, 캠페인명, 광고그룹명, 소재ID, 장바구니수)
+    """
+    if file.name.endswith(".csv"):
+        for enc in ["utf-8-sig", "cp949", "utf-8", "euc-kr"]:
+            try:
+                file.seek(0)
+                df_raw = pd.read_csv(file, encoding=enc, sep=None,
+                                     engine="python", skiprows=1)
+                break
+            except Exception:
+                continue
+    else:
+        file.seek(0)
+        df_raw = pd.read_excel(file, sheet_name=0, skiprows=1)
+
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+
+    # 컬럼명 정규화 매핑
+    CONV_COL_MAP = {
+        "일별": "날짜", "일자": "날짜",
+        "캠페인": "캠페인명", "캠페인명": "캠페인명",
+        "광고그룹": "광고그룹명", "광고그룹명": "광고그룹명",
+        "소재": "소재ID",
+        "전환 유형": "전환유형", "전환유형": "전환유형",
+        "총 전환수": "전환수", "총전환수": "전환수", "전환수": "전환수",
+        "총 전환 출액(원)": "전환매출액",
+        "총전환매출액(원)": "전환매출액",
+    }
+    rename = {c: CONV_COL_MAP[c] for c in df_raw.columns if c in CONV_COL_MAP}
+    df_raw = df_raw.rename(columns=rename)
+
+    # 장바구니 필터
+    if "전환유형" in df_raw.columns:
+        df_cart = df_raw[df_raw["전환유형"].astype(str).str.contains(
+            "장바구니", na=False)].copy()
+    else:
+        df_cart = df_raw.copy()
+
+    # 날짜 파싱
+    if "날짜" in df_cart.columns:
+        def _parse(s):
+            s = str(s).strip().rstrip(".")
+            parts = s.replace("/", ".").split(".")
+            if len(parts) == 3:
+                return pd.to_datetime(
+                    f"{parts[0]}-{parts[1].zfill(2)}-{parts[2].zfill(2)}",
+                    errors="coerce")
+            return pd.to_datetime(s, errors="coerce")
+        df_cart["날짜"] = df_cart["날짜"].apply(_parse)
+
+    # 전환수 숫자 정규화
+    if "전환수" in df_cart.columns:
+        df_cart["전환수"] = pd.to_numeric(
+            df_cart["전환수"].astype(str).str.replace(",", ""),
+            errors="coerce").fillna(0)
+
+    keep = [c for c in ["날짜","캠페인명","광고그룹명","소재ID","전환수"] if c in df_cart.columns]
+    return df_cart[keep].reset_index(drop=True)
+
+
+def merge_naver_cart(df_main: pd.DataFrame,
+                     df_conv: pd.DataFrame) -> pd.DataFrame:
+    """
+    통합 RD(df_main)에 전환유형별 장바구니 수 VLOOKUP 병합.
+    - 키: 날짜 + 소재ID(광고명)
+    - df_main의 '장바구니담기수' 컬럼을 장바구니 전환수로 채움
+    """
+    if df_conv.empty or "소재ID" not in df_conv.columns:
+        return df_main
+
+    df = df_main.copy()
+    ad_col = next((c for c in ["광고명"] if c in df.columns), None)
+    if ad_col is None:
+        return df
+
+    # 소재ID × 날짜 기준 장바구니 집계
+    df_conv_agg = df_conv.groupby(
+        ["날짜", "소재ID"], dropna=False
+    )["전환수"].sum().reset_index()
+    df_conv_agg.columns = ["날짜", "소재ID", "장바구니_conv"]
+
+    df["_merge_key_ad"]   = df[ad_col].astype(str).str.strip()
+    df["_merge_key_date"] = pd.to_datetime(df["날짜"], errors="coerce")
+    df_conv_agg["_merge_key_ad"]   = df_conv_agg["소재ID"].astype(str).str.strip()
+    df_conv_agg["_merge_key_date"] = pd.to_datetime(df_conv_agg["날짜"], errors="coerce")
+
+    df = df.merge(
+        df_conv_agg[["_merge_key_date","_merge_key_ad","장바구니_conv"]],
+        on=["_merge_key_date","_merge_key_ad"],
+        how="left"
+    )
+
+    # 장바구니담기수 컬럼 업데이트
+    df["장바구니담기수"] = df["장바구니_conv"].fillna(
+        df.get("장바구니담기수", 0)
+    )
+    df = df.drop(columns=["_merge_key_ad","_merge_key_date","장바구니_conv"],
+                 errors="ignore")
+    return df
+
+
 MEDIA_COL_MAP = {
     "Meta": {
         "date":       ["날짜", "Date", "일자", "기간"],
@@ -681,6 +843,9 @@ if "meta_api_df"         not in st.session_state: st.session_state.meta_api_df  
 if "advoost_product_df"  not in st.session_state: st.session_state.advoost_product_df  = pd.DataFrame()
 if "integrated_df"       not in st.session_state: st.session_state.integrated_df       = pd.DataFrame()
 if "manual_report_df"    not in st.session_state: st.session_state.manual_report_df    = pd.DataFrame()
+if "naver_creative_index" not in st.session_state: st.session_state.naver_creative_index = pd.DataFrame(
+    columns=["소재ID(nad)", "한글상품명", "카테고리"])
+if "naver_conv_df"        not in st.session_state: st.session_state.naver_conv_df        = pd.DataFrame()
 
 # ══════════════════════════════════════════════════════════════
 # 영구 메모리 — comment_history를 JSON 파일에 저장/로드
@@ -2979,59 +3144,183 @@ elif page == "🔄 RAW 리포트 변환":
         if "manual_upload_dfs" not in st.session_state:
             st.session_state.manual_upload_dfs = {}
 
-        # 매체별 탭
+        # ── 소재 인덱스 편집 섹션 ────────────────────────────────
+        with st.expander("📋 Naver 소재 인덱스 관리 (nad → 한글 상품명)", expanded=False):
+            st.caption("nad로 시작하는 소재ID를 한글 상품명으로 매핑합니다. 직접 입력하거나 CSV를 업로드하세요.")
+
+            idx_col1, idx_col2 = st.columns([3, 2])
+            with idx_col1:
+                idx_upload = st.file_uploader(
+                    "소재 인덱스 CSV 업로드 (소재ID(nad), 한글상품명, 카테고리)",
+                    type=["csv", "xlsx"], key="naver_idx_upload")
+                if idx_upload:
+                    try:
+                        if idx_upload.name.endswith(".csv"):
+                            df_idx_up = pd.read_csv(idx_upload, encoding="utf-8-sig")
+                        else:
+                            df_idx_up = pd.read_excel(idx_upload, sheet_name=0)
+                        df_idx_up.columns = [str(c).strip() for c in df_idx_up.columns]
+                        # 컬럼명 유연하게 처리
+                        rename_idx = {}
+                        for col in df_idx_up.columns:
+                            cl = str(col).lower().replace(" ","")
+                            if "nad" in cl or "소재id" in cl or "소재코드" in cl:
+                                rename_idx[col] = "소재ID(nad)"
+                            elif "한글" in cl or "상품명" in cl or "소재명" in cl:
+                                rename_idx[col] = "한글상품명"
+                            elif "카테고리" in cl or "category" in cl:
+                                rename_idx[col] = "카테고리"
+                        df_idx_up = df_idx_up.rename(columns=rename_idx)
+                        for c in ["소재ID(nad)","한글상품명","카테고리"]:
+                            if c not in df_idx_up.columns:
+                                df_idx_up[c] = ""
+                        st.session_state.naver_creative_index = df_idx_up[
+                            ["소재ID(nad)","한글상품명","카테고리"]].copy()
+                        st.success(f"✅ {len(df_idx_up):,}개 소재 인덱스 로드 완료")
+                    except Exception as e:
+                        st.error(f"인덱스 파일 오류: {e}")
+
+            with idx_col2:
+                if not st.session_state.naver_creative_index.empty:
+                    st.caption(f"현재 인덱스: {len(st.session_state.naver_creative_index):,}개")
+                    st.download_button(
+                        "⬇️ 현재 인덱스 CSV 다운로드",
+                        data=st.session_state.naver_creative_index.to_csv(
+                            index=False, encoding="utf-8-sig").encode("utf-8-sig"),
+                        file_name="naver_creative_index.csv",
+                        mime="text/csv", use_container_width=True,
+                    )
+
+            # 직접 편집
+            st.caption("직접 편집 (행 추가/수정 가능)")
+            edited_idx = st.data_editor(
+                st.session_state.naver_creative_index,
+                use_container_width=True, num_rows="dynamic",
+                height=220, key="naver_idx_editor",
+                column_config={
+                    "소재ID(nad)": st.column_config.TextColumn("소재ID (nad...)", width="large"),
+                    "한글상품명":  st.column_config.TextColumn("한글 상품명",  width="large"),
+                    "카테고리":    st.column_config.TextColumn("카테고리",      width="medium"),
+                }
+            )
+            if st.button("💾 인덱스 저장", key="save_naver_idx"):
+                st.session_state.naver_creative_index = edited_idx.dropna(
+                    subset=["소재ID(nad)"]).reset_index(drop=True)
+                st.success("✅ 저장 완료!")
+
+        # ── 매체별 탭 ────────────────────────────────────────────
         platform_tabs = st.tabs(PLATFORM_LIST)
 
         for pt, platform in zip(platform_tabs, PLATFORM_LIST):
             with pt:
-                up_file = st.file_uploader(
-                    f"{platform} RAW 파일 업로드",
-                    type=["csv", "xlsx"],
-                    key=f"manual_raw_{platform}",
-                    label_visibility="collapsed",
-                )
-                if up_file:
-                    try:
-                        NAVER_SKIP = ["Naver SSA", "Naver BSA"]
-                        if up_file.name.endswith(".csv"):
-                            for enc in ["utf-8-sig", "cp949", "utf-8"]:
-                                try:
-                                    up_file.seek(0)
-                                    skip = 1 if platform in NAVER_SKIP else 0
-                                    df_raw_m = pd.read_csv(up_file, encoding=enc, skiprows=skip)
-                                    break
-                                except Exception:
-                                    continue
-                        else:
-                            # 네이버 계열은 1행(제목 행) 스킵
-                            skip = 1 if platform in NAVER_SKIP else 0
-                            df_raw_m = pd.read_excel(up_file, sheet_name=0, skiprows=skip)
+                # ── Naver SSA / BSA 전용 UI ──────────────────────
+                if platform in ("Naver SSA", "Naver BSA"):
+                    st.caption(f"**{platform}** — RD 파일 2종 업로드")
 
-                        df_std = standardize_raw_df(df_raw_m, platform)
-                        st.session_state.manual_upload_dfs[platform] = df_std
+                    nc1, nc2 = st.columns(2)
+                    with nc1:
+                        st.markdown("**① 일별 성과 RD** (비용·구매·매출)")
+                        up_main = st.file_uploader(
+                            f"{platform} 일별 RD",
+                            type=["csv","xlsx"],
+                            key=f"manual_raw_{platform}",
+                            label_visibility="collapsed",
+                        )
+                    with nc2:
+                        st.markdown("**② 전환유형별 RD** (장바구니 수 추출용)")
+                        up_conv = st.file_uploader(
+                            f"{platform} 전환유형별 RD",
+                            type=["csv","xlsx"],
+                            key=f"manual_conv_{platform}",
+                            label_visibility="collapsed",
+                        )
 
-                        dates_m = df_std["날짜"].dropna().dt.date
-                        st.success(f"✅ {len(df_std):,}행 | {dates_m.min()} ~ {dates_m.max()}")
+                    if up_main:
+                        try:
+                            df_raw_m = load_naver_file_auto(up_main)
+                            df_std = standardize_raw_df(df_raw_m, platform)
 
-                        # 미리보기
-                        preview_m = df_std.copy()
-                        preview_m["날짜"] = preview_m["날짜"].dt.strftime("%Y-%m-%d")
-                        st.dataframe(preview_m.head(10), use_container_width=True,
-                                     height=200, hide_index=True)
+                            # ① 소재 인덱스 VLOOKUP (nad → 한글상품명)
+                            df_std = apply_creative_index(
+                                df_std, st.session_state.naver_creative_index)
 
-                    except Exception as e:
-                        st.error(f"파일 처리 오류: {e}")
+                            # ② 전환유형별 RD가 있으면 장바구니 병합
+                            if up_conv:
+                                df_conv = parse_naver_conv_rd(up_conv)
+                                st.session_state.naver_conv_df = df_conv
+                                df_std = merge_naver_cart(df_std, df_conv)
+                                st.info(f"🛒 장바구니 전환 데이터 병합 완료 "
+                                        f"({len(df_conv):,}건)")
 
-                # 이미 업로드된 현황 표시
-                if platform in st.session_state.manual_upload_dfs:
-                    df_ex = st.session_state.manual_upload_dfs[platform]
-                    dates_ex = df_ex["날짜"].dropna().dt.date
-                    dr_ex = f"{dates_ex.min()} ~ {dates_ex.max()}" if not dates_ex.empty else "날짜 없음"
-                    st.caption(f"현재 로드: **{len(df_ex):,}행** ({dr_ex})")
-                    if st.button(f"🗑️ {platform} 데이터 삭제",
-                                 key=f"del_manual_{platform}"):
-                        del st.session_state.manual_upload_dfs[platform]
-                        st.rerun()
+                            st.session_state.manual_upload_dfs[platform] = df_std
+
+                            dates_m = df_std["날짜"].dropna().dt.date
+                            st.success(f"✅ {len(df_std):,}행 | {dates_m.min()} ~ {dates_m.max()}")
+
+                            # 미리보기
+                            preview_m = df_std.copy()
+                            preview_m["날짜"] = preview_m["날짜"].dt.strftime("%Y-%m-%d")
+                            st.dataframe(preview_m.head(15), use_container_width=True,
+                                         height=240, hide_index=True)
+
+                        except Exception as e:
+                            st.error(f"파일 처리 오류: {e}")
+
+                    # 현황 표시
+                    if platform in st.session_state.manual_upload_dfs:
+                        df_ex = st.session_state.manual_upload_dfs[platform]
+                        dates_ex = df_ex["날짜"].dropna().dt.date
+                        dr_ex = f"{dates_ex.min()} ~ {dates_ex.max()}" if not dates_ex.empty else "날짜 없음"
+                        st.caption(f"현재 로드: **{len(df_ex):,}행** ({dr_ex})")
+                        if st.button(f"🗑️ {platform} 데이터 삭제",
+                                     key=f"del_manual_{platform}"):
+                            del st.session_state.manual_upload_dfs[platform]
+                            st.rerun()
+
+                # ── 일반 매체 기존 UI ─────────────────────────────
+                else:
+                    up_file = st.file_uploader(
+                        f"{platform} RAW 파일 업로드",
+                        type=["csv", "xlsx"],
+                        key=f"manual_raw_{platform}",
+                        label_visibility="collapsed",
+                    )
+                    if up_file:
+                        try:
+                            if up_file.name.endswith(".csv"):
+                                for enc in ["utf-8-sig", "cp949", "utf-8"]:
+                                    try:
+                                        up_file.seek(0)
+                                        df_raw_m = pd.read_csv(up_file, encoding=enc)
+                                        break
+                                    except Exception:
+                                        continue
+                            else:
+                                df_raw_m = pd.read_excel(up_file, sheet_name=0)
+
+                            df_std = standardize_raw_df(df_raw_m, platform)
+                            st.session_state.manual_upload_dfs[platform] = df_std
+
+                            dates_m = df_std["날짜"].dropna().dt.date
+                            st.success(f"✅ {len(df_std):,}행 | {dates_m.min()} ~ {dates_m.max()}")
+
+                            preview_m = df_std.copy()
+                            preview_m["날짜"] = preview_m["날짜"].dt.strftime("%Y-%m-%d")
+                            st.dataframe(preview_m.head(10), use_container_width=True,
+                                         height=200, hide_index=True)
+
+                        except Exception as e:
+                            st.error(f"파일 처리 오류: {e}")
+
+                    if platform in st.session_state.manual_upload_dfs:
+                        df_ex = st.session_state.manual_upload_dfs[platform]
+                        dates_ex = df_ex["날짜"].dropna().dt.date
+                        dr_ex = f"{dates_ex.min()} ~ {dates_ex.max()}" if not dates_ex.empty else "날짜 없음"
+                        st.caption(f"현재 로드: **{len(df_ex):,}행** ({dr_ex})")
+                        if st.button(f"🗑️ {platform} 데이터 삭제",
+                                     key=f"del_manual_{platform}"):
+                            del st.session_state.manual_upload_dfs[platform]
+                            st.rerun()
 
         # 업로드 현황 요약 + 통합 리포트 생성 버튼
         st.divider()
