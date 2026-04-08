@@ -240,7 +240,7 @@ MEDIA_SIGNATURES = [
     # Meta는 마지막 — '캠페인 이름'이 타 매체와 겹치므로 다른 매체가 먼저 걸러진 뒤 처리
     ("Meta",          ["지출 금액 (KRW)", "광고 세트 이름", "캠페인 이름"]),
     # Naver SSA — 실제 파일: 일별/캠페인/광고그룹/소재/총비용/노출수/클릭수/구매완료/전환매출액(원)
-    ("Naver SSA",     ["일별", "캠페인", "광고그룹", "총비용", "전환매출액(원)"]),
+    ("Naver SSA",     ["일별", "캠페인", "광고그룹", "총비용", "구매완료"]),
     # Naver BSA — 고유 컬럼(전환구매 등) 기반 유지, 폴백으로 SSA 안 잡히는 경우 처리
     ("Naver BSA",     ["총비용(vat포함,원)", "전환구매", "총전환매출액(원)"]),
 ]
@@ -375,9 +375,10 @@ PLATFORM_COL_MAPS = {
         # 구매 — 실제 파일 컬럼명 '구매완료'
         "구매완료": "구매",
         "총 전환수": "구매", "총전환수": "구매", "전환구매": "구매",
-        # 매출 — 실제 파일 컬럼명 '전환매출액(원)'
-        "전환매출액(원)": "매출액",
+        # 매출 — 실제 파일: '구매완료 전환매출액(원)' 또는 '전환매출액(원)'
         "구매완료 전환매출액(원)": "매출액",
+        "전환매출액(원)": "매출액",
+        "구매완료전환매출액(원)": "매출액",
         "총 전환매출액(원)": "매출액", "총전환매출액(원)": "매출액",
         # 장바구니
         "장바구니": "장바구니담기수", "장바구니담기": "장바구니담기수",
@@ -392,8 +393,9 @@ PLATFORM_COL_MAPS = {
         "클릭수": "클릭", "클릭": "클릭",
         "구매완료": "구매",
         "총 전환수": "구매", "총전환수": "구매", "전환구매": "구매",
-        "전환매출액(원)": "매출액",
         "구매완료 전환매출액(원)": "매출액",
+        "전환매출액(원)": "매출액",
+        "구매완료전환매출액(원)": "매출액",
         "총 전환매출액(원)": "매출액", "총전환매출액(원)": "매출액",
         "장바구니": "장바구니담기수", "장바구니담기": "장바구니담기수",
     },
@@ -3384,46 +3386,68 @@ elif page == "🔄 RAW 리포트 변환":
             errors = []
             detection_log = []
 
+            NAVER_SKIPROWS_LIST = ["Naver SSA", "Naver BSA"]
+
+            def _load_file(f, skiprows=0):
+                """인코딩·구분자 자동 감지로 파일 로드"""
+                if f.name.endswith(".csv"):
+                    for enc in ["utf-8-sig", "cp949", "utf-8", "euc-kr"]:
+                        try:
+                            f.seek(0)
+                            df = pd.read_csv(f, encoding=enc, skiprows=skiprows,
+                                             sep=None, engine="python")
+                            df.columns = [str(c).strip() for c in df.columns]
+                            return df
+                        except Exception:
+                            continue
+                    return None
+                else:
+                    try:
+                        f.seek(0)
+                        df = pd.read_excel(f, sheet_name=0, skiprows=skiprows)
+                        df.columns = [str(c).strip() for c in df.columns]
+                        return df
+                    except Exception:
+                        return None
+
             for f in all_files:
                 try:
-                    # ① 1차 로드 (skiprows 없이) → 매체 자동 감지
-                    if f.name.endswith(".csv"):
-                        for enc in ["utf-8-sig", "cp949", "utf-8"]:
-                            try:
-                                f.seek(0)
-                                df_raw = pd.read_csv(f, encoding=enc)
-                                break
-                            except Exception:
-                                continue
-                    else:
-                        f.seek(0)
-                        df_raw = pd.read_excel(f, sheet_name=0)
-                    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+                    # ① 1차 로드 (skiprows=0)
+                    df_raw = _load_file(f, skiprows=0)
+                    if df_raw is None:
+                        errors.append(f"❌ `{f.name}` — 파일 읽기 실패")
+                        detection_log.append({"파일": f.name, "감지 매체": "❌ 읽기 실패", "행수": 0, "컬럼 수": 0})
+                        continue
 
-                    # ② 매체 자동 감지
+                    # ② 1차 감지
                     detected = detect_media(df_raw)
 
-                    # ③ Naver 계열: 첫 행이 제목 행이므로 skiprows=1로 재로드
-                    NAVER_SKIPROWS_LIST = ["Naver SSA", "Naver BSA"]
-                    if detected in NAVER_SKIPROWS_LIST:
-                        if f.name.endswith(".csv"):
-                            for enc in ["utf-8-sig", "cp949", "utf-8"]:
-                                try:
-                                    f.seek(0)
-                                    df_raw = pd.read_csv(f, encoding=enc, skiprows=1)
-                                    break
-                                except Exception:
-                                    continue
-                        else:
-                            f.seek(0)
-                            df_raw = pd.read_excel(f, sheet_name=0, skiprows=1)
-                        df_raw.columns = [str(c).strip() for c in df_raw.columns]
-                        # skiprows 후 재감지 (컬럼 확인)
-                        detected = detect_media(df_raw) or detected
+                    # ③ 감지 실패 또는 컬럼 수가 비정상(≤2)이면 skiprows=1 재시도
+                    #    네이버 파일: 첫 행 = '조선미녀_Daily(...)' 제목 → 컬럼이 1개로 잡힘
+                    if detected is None or len(df_raw.columns) <= 2:
+                        df_retry = _load_file(f, skiprows=1)
+                        if df_retry is not None and len(df_retry.columns) > 2:
+                            detected_retry = detect_media(df_retry)
+                            if detected_retry is not None:
+                                df_raw = df_retry
+                                detected = detected_retry
+
+                    # ④ Naver 계열이지만 skiprows=0으로 감지된 경우 → skiprows=1로 재로드
+                    if detected in NAVER_SKIPROWS_LIST and len(df_raw.columns) > 2:
+                        # 첫 번째 컬럼값이 날짜 형식인지 확인
+                        first_col_vals = df_raw.iloc[:, 0].astype(str).str.strip()
+                        is_date_col = first_col_vals.str.match(r"\d{4}").any()
+                        if not is_date_col:
+                            # 제목 행이 skiprows=0에서 헤더로 잡힌 경우
+                            df_retry = _load_file(f, skiprows=1)
+                            if df_retry is not None:
+                                df_raw = df_retry
+                                detected = detect_media(df_raw) or detected
 
                     if detected is None:
                         errors.append(f"❌ `{f.name}` — 매체 감지 실패 (알 수 없는 컬럼 구조)")
-                        detection_log.append({"파일": f.name, "감지 매체": "❌ 감지 실패", "행수": len(df_raw), "컬럼 수": len(df_raw.columns)})
+                        detection_log.append({"파일": f.name, "감지 매체": "❌ 감지 실패",
+                                              "행수": len(df_raw), "컬럼 수": len(df_raw.columns)})
                         continue
 
                     # 변환: TRANSFORM_MAP 우선, 없으면 standardize_raw_df 사용
