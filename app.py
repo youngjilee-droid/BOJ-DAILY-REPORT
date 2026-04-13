@@ -167,6 +167,7 @@ def transform_advoost(df_raw):
 
     df = pd.DataFrame(rows, columns=REPORT_COLS)
     df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+    df["매체"] = "Naver ADVoost"
     return df.sort_values("날짜").reset_index(drop=True)
 
 
@@ -229,6 +230,7 @@ def transform_meta(df_raw):
         })
     df = pd.DataFrame(rows, columns=REPORT_COLS)
     df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+    df["매체"] = "Meta"
     return df.sort_values(["날짜", "캠페인명", "광고그룹명", "광고명"], ascending=True).reset_index(drop=True)
 
 
@@ -342,6 +344,7 @@ def transform_naver_ssa(df_raw, conv_df=None, platform="Naver SSA"):
 
     df = pd.DataFrame(rows, columns=REPORT_COLS)
     df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+    df["매체"] = platform
     return df.sort_values(
         ["날짜", "캠페인명", "광고그룹명", "광고명"]
     ).reset_index(drop=True)
@@ -510,6 +513,7 @@ def transform_naver_bsa(df_raw, conv_df=None,
 
     df = pd.DataFrame(rows, columns=REPORT_COLS)
     df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+    df["매체"] = "Naver BSA"
     return df.sort_values(["날짜", "캠페인명", "광고그룹명", "광고명"]).reset_index(drop=True)
 
 
@@ -3792,26 +3796,40 @@ elif page == "🔄 RAW 리포트 변환":
 
             if st.button("🧩 통합 리포트 생성", type="primary",
                          use_container_width=True, key="build_manual_report"):
-                all_m_dfs = list(st.session_state.manual_upload_dfs.values())
-                df_manual_total = pd.concat(all_m_dfs, ignore_index=True).sort_values(
-                    ["날짜", "매체", "캠페인명"]
-                ).reset_index(drop=True)
+                all_m_dfs = []
+                for m, df_m in st.session_state.manual_upload_dfs.items():
+                    df_c = df_m.copy()
+                    # 매체 컬럼이 없으면 탭 이름으로 추가
+                    if "매체" not in df_c.columns:
+                        df_c["매체"] = m
+                    all_m_dfs.append(df_c)
+
+                df_manual_total = pd.concat(all_m_dfs, ignore_index=True)
+
+                # sort 기준 컬럼만 사용 (없는 컬럼 제외)
+                sort_cols = [c for c in ["날짜", "매체", "캠페인명", "광고그룹명", "광고명"]
+                             if c in df_manual_total.columns]
+                df_manual_total = df_manual_total.sort_values(sort_cols).reset_index(drop=True)
                 st.session_state.manual_report_df = df_manual_total
 
-                # converted_reports에도 매체별로 저장 (기존 다운로드 플로우 활용)
+                # converted_reports에 매체별로 저장
                 for m, df_m in st.session_state.manual_upload_dfs.items():
-                    # REPORT_COLS 기준으로 컬럼 정렬해서 converted_reports에 저장
-                    df_for_conv = df_m.rename(columns={"장바구니담기수": "장바구니",
-                                                        "동영상조회": "동영상 조회"}).copy()
+                    df_for_conv = df_m.copy()
+                    # REPORT_COLS 컬럼명으로 통일 (BSA/SSA는 이미 REPORT_COLS 기준)
+                    # 혹시 INTEGRATED_COLS 컬럼명이 있을 경우 rename
+                    df_for_conv = df_for_conv.rename(columns={
+                        "장바구니담기수": "장바구니",
+                        "동영상조회":     "동영상 조회",
+                    })
                     for col in REPORT_COLS:
                         if col not in df_for_conv.columns:
                             df_for_conv[col] = None
                     df_for_conv = df_for_conv[REPORT_COLS]
                     if m in st.session_state.converted_reports:
                         existing = st.session_state.converted_reports[m]
-                        df_for_conv = pd.concat([existing, df_for_conv], ignore_index=True).drop_duplicates(
-                            subset=["날짜","캠페인명","광고그룹명","광고명"]
-                        ).reset_index(drop=True)
+                        df_for_conv = pd.concat([existing, df_for_conv], ignore_index=True
+                            ).drop_duplicates(subset=["날짜","캠페인명","광고그룹명","광고명"]
+                            ).reset_index(drop=True)
                     st.session_state.converted_reports[m] = df_for_conv
 
                 st.success(f"✅ 통합 리포트 생성 완료 — {len(df_manual_total):,}행 / {len(st.session_state.manual_upload_dfs)}개 매체")
