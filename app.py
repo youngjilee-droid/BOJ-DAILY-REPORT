@@ -112,48 +112,62 @@ def _parse_advoost_date(s):
 
 def transform_advoost(df_raw):
     """
-    Naver ADVoost RAW → 표준 리포트 컬럼
-    - 날짜   : 기간 → 날짜 (다양한 형식 자동 파싱)
-    - 캠페인명: 캠페인 이름
-    - 광고그룹명: 애셋 그룹 이름
-    - 광고명  : 'Asset_all_items' 고정
-    - 비용   : 총 비용 / 1.1 (VAT 제외)
-    - 노출   : 노출
-    - 클릭   : 클릭
-    - 구매   : 구매완료수
-    - 매출액  : 구매완료 전환 매출액
-    - 장바구니: 장바구니 담기수
-    - 도달~동영상 조회: None (ADVoost 미제공)
+    Naver ADVoost RAW → 내부 리포트 컬럼 변환
+    실제 파일 컬럼 기준 (result.csv 검증 완료):
+      기간                  → 날짜
+      날짜 기반 연월prefix   → 캠페인명 (ex. 2604_ADVoost)  ← RD의 캠페인 이름 무시
+      애셋 그룹 이름         → 광고그룹명 (Asset_All_Items)
+      Asset_All_Items 고정  → 광고명
+      총비용 / 1.1          → 비용 (VAT 제외)
+      노출수                → 노출
+      클릭수                → 클릭
+      구매완료 수            → 구매
+      장바구니 담기 수       → 장바구니
+      구매완료 전환매출액    → 매출액
     """
-    # 컬럼명 공백·특수문자 정규화 후 딕셔너리로 접근 (r.get 오작동 방지)
     df_raw = df_raw.copy()
     df_raw.columns = [str(c).strip() for c in df_raw.columns]
 
-    # 컬럼 존재 여부 확인용 헬퍼
-    def _col(row, name, default=None):
-        return row[name] if name in row.index else default
+    def _col(row, *names, default=None):
+        for name in names:
+            if name in row.index and pd.notna(row[name]):
+                return row[name]
+        return default
 
     rows = []
     for _, r in df_raw.iterrows():
+        # 날짜 파싱
+        dt = _parse_advoost_date(_col(r, "기간", "기간", default=""))
+
+        # 캠페인명: RD 캠페인 이름이 아닌 날짜 기준 연월로 재계산
+        # ex) 2026-04-12 → 2604_ADVoost
+        try:
+            ts = pd.Timestamp(dt)
+            prefix = f"{str(ts.year)[-2:]}{str(ts.month).zfill(2)}"
+        except Exception:
+            prefix = ""
+        campaign_name = f"{prefix}_ADVoost" if prefix else "ADVoost"
+
         rows.append({
-            "날짜":       _parse_advoost_date(_col(r, "기간")),        # 기간 = 날짜
-            "캠페인명":   str(_col(r, "캠페인 이름", "")).strip(),
-            "광고그룹명": str(_col(r, "애셋 그룹 이름", "")).strip(),
-            "광고명":     "Asset_all_items",
-            "비용":       _to_float(_col(r, "총 비용", 0)) / 1.1,
-            "노출":       _to_int(_col(r, "노출", 0)),
-            "클릭":       _to_int(_col(r, "클릭", 0)),
-            "구매":       _to_int(_col(r, "구매완료수", 0)),
-            "매출액":     _to_int(_col(r, "구매완료 전환 매출액", 0)),
-            "장바구니":   _to_int(_col(r, "장바구니 담기수", 0)),
+            "날짜":       dt,
+            "캠페인명":   campaign_name,
+            "광고그룹명": "Asset_All_Items",
+            "광고명":     "Asset_All_Items",
+            "비용":       _to_float(_col(r, "총비용", "총 비용", default=0)) / 1.1,
+            "노출":       _to_int(_col(r, "노출수", "노출", default=0)),
+            "클릭":       _to_int(_col(r, "클릭수", "클릭", default=0)),
+            "구매":       _to_int(_col(r, "구매완료 수", "구매완료수", default=0)),
+            "매출액":     _to_int(_col(r, "구매완료 전환매출액", "구매완료 전환 매출액", default=0)),
+            "장바구니":   _to_int(_col(r, "장바구니 담기 수", "장바구니 담기수", default=0)),
             "도달":       None,
             "참여":       None,
             "팔로우":     None,
             "동영상 조회": None,
         })
+
     df = pd.DataFrame(rows, columns=REPORT_COLS)
     df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
-    return df.sort_values("날짜", ascending=False).reset_index(drop=True)
+    return df.sort_values("날짜").reset_index(drop=True)
 
 
 def transform_meta(df_raw):
@@ -220,11 +234,290 @@ def transform_meta(df_raw):
 
 # 매체명 → transform 함수 매핑
 # 다른 매체 추가 시 transform 함수 + MEDIA_SIGNATURES 항목만 추가하면 됨
+def transform_naver_ssa(df_raw, conv_df=None, platform="Naver SSA"):
+    """
+    Naver SSA / BSA RAW (일별 성과) → 내부 리포트 컬럼 변환
+    실제 파일 컬럼 기준 (4/12 검증 완료):
+      일별                    → 날짜
+      날짜 기반 연월prefix     → 캠페인명 (ex. 2604_SSA, MO/PC 제거)
+      광고그룹                 → 광고그룹명 (SSA_PC_선케어 그대로)
+      소재(nad)               → 광고명 (소재 인덱스 VLOOKUP → 한글명)
+      총비용 / 1.1            → 비용 (VAT 제외)
+      노출수                  → 노출
+      클릭수                  → 클릭
+      구매완료 전환수           → 구매
+      구매완료 전환매출액(원)   → 매출액
+      [전환유형별 RD VLOOKUP]  → 장바구니 (장바구니 담기 기준)
+
+    conv_df: parse_naver_conv_rd() 결과 DataFrame (None이면 장바구니=0)
+    """
+    import re as _re
+
+    df_raw = df_raw.copy()
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+
+    # 소재 인덱스 딕셔너리 구성 (session_state → 없으면 DEFAULT)
+    try:
+        idx = st.session_state.get("naver_creative_index", _DEFAULT_NAD_DF)
+        if idx is None or (hasattr(idx, "empty") and idx.empty):
+            idx = _DEFAULT_NAD_DF
+    except Exception:
+        idx = _DEFAULT_NAD_DF
+
+    nad_lookup = {}
+    if idx is not None and not idx.empty and "소재ID(nad)" in idx.columns:
+        nad_lookup = dict(zip(
+            idx["소재ID(nad)"].astype(str).str.strip(),
+            idx["한글상품명"].astype(str).str.strip()
+        ))
+
+    # 전환유형별 장바구니 딕셔너리: (날짜.date, nad) → 장바구니수
+    cart_lookup = {}
+    if conv_df is not None and not conv_df.empty:
+        for _, r in conv_df.iterrows():
+            dt = pd.Timestamp(r.get("날짜")).date() if pd.notna(r.get("날짜")) else None
+            nad = str(r.get("소재ID", "")).strip()
+            cnt = int(float(str(r.get("전환수", 0)).replace(",", "") or 0))
+            if dt and nad:
+                key = (dt, nad)
+                cart_lookup[key] = cart_lookup.get(key, 0) + cnt
+
+    def _parse_date(s):
+        s = str(s).strip().rstrip(".")
+        parts = s.split(".")
+        if len(parts) == 3:
+            return pd.to_datetime(
+                f"{parts[0]}-{parts[1].zfill(2)}-{parts[2].zfill(2)}",
+                errors="coerce")
+        return pd.to_datetime(s, errors="coerce")
+
+    def _num(v, default=0):
+        try: return float(str(v).replace(",", "")) if pd.notna(v) else default
+        except: return default
+
+    media_type = "SSA" if "SSA" in platform else "BSA"
+
+    rows = []
+    for _, r in df_raw.iterrows():
+        dt = _parse_date(r.get("일별", ""))
+
+        # 캠페인명: 날짜 기반 연월 prefix + 캠페인에서 _MO/_PC 제거
+        try:
+            ts = pd.Timestamp(dt)
+            prefix = f"{str(ts.year)[-2:]}{str(ts.month).zfill(2)}"
+        except Exception:
+            prefix = ""
+        raw_camp = str(r.get("캠페인", "")).strip()
+        camp_clean = _re.sub(r"[_\-](MO|PC)$", "", raw_camp, flags=_re.IGNORECASE)
+        campaign_name = f"{prefix}_{camp_clean}" if prefix else camp_clean
+
+        # 광고그룹명 그대로 (SSA_PC_선케어 등)
+        adgroup = str(r.get("광고그룹", "")).strip()
+
+        # 소재(nad) → 한글상품명 VLOOKUP
+        nad_raw = str(r.get("소재", "")).strip()
+        ad_name = nad_lookup.get(nad_raw, nad_raw)  # 없으면 nad 그대로
+
+        # 장바구니: 전환유형별 VLOOKUP (IFERROR → 0)
+        cart = 0
+        if dt is not None and pd.notna(dt):
+            cart = cart_lookup.get((dt.date(), nad_raw), 0)
+
+        rows.append({
+            "날짜":       dt,
+            "캠페인명":   campaign_name,
+            "광고그룹명": adgroup,
+            "광고명":     ad_name,
+            "비용":       _num(r.get("총비용", 0)) / 1.1,
+            "노출":       int(_num(r.get("노출수", 0))),
+            "클릭":       int(_num(r.get("클릭수", 0))),
+            "구매":       int(_num(r.get("구매완료 전환수", 0))),
+            "매출액":     int(_num(r.get("구매완료 전환매출액(원)", 0))),
+            "장바구니":   int(cart),
+            "도달":       None,
+            "참여":       None,
+            "팔로우":     None,
+            "동영상 조회": None,
+        })
+
+    df = pd.DataFrame(rows, columns=REPORT_COLS)
+    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+    return df.sort_values(
+        ["날짜", "캠페인명", "광고그룹명", "광고명"]
+    ).reset_index(drop=True)
+
+
+def transform_naver_bsa(df_raw, conv_df=None,
+                         bsa_contracts=None):
+    """
+    Naver BSA RAW → 내부 리포트 컬럼 변환
+
+    BSA는 RD 상 비용=0 → 계약 정보로 일별 비용 자동 계산:
+      일별 비용 = (VAT포함 계약금액 / 1.1) / 계약 운영일수
+      적용 규칙:
+        ① 당일 해당 디바이스(BSA_PC / BSA_MO)에서 노출>0인 nad에만 비용 배분
+        ② 노출>0인 nad가 1건 → 전액 배분
+        ③ 노출>0인 nad가 2건 이상 → 비율 배분 (각 nad 노출 / 전체 노출)
+
+    bsa_contracts: dict 형태
+      {
+        "PC": {"amount_vat": 22000, "start": "2026-04-01", "end": "2026-04-30"},
+        "MO": {"amount_vat": 157666, "start": "2026-04-01", "end": "2026-04-30"},
+      }
+      amount_vat: VAT 포함 계약 총액(원)
+      start/end : 계약 운영 기간 (운영일수 = end - start + 1)
+    """
+    import re as _re
+
+    # 계약 정보가 없으면 session_state에서 가져옴
+    if bsa_contracts is None:
+        bsa_contracts = st.session_state.get("bsa_contracts", {})
+
+    df_raw = df_raw.copy()
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+
+    # 소재 인덱스
+    try:
+        idx = st.session_state.get("naver_creative_index", _DEFAULT_NAD_DF)
+        if idx is None or (hasattr(idx, "empty") and idx.empty):
+            idx = _DEFAULT_NAD_DF
+    except Exception:
+        idx = _DEFAULT_NAD_DF
+    nad_lookup = {}
+    if idx is not None and not idx.empty and "소재ID(nad)" in idx.columns:
+        nad_lookup = dict(zip(
+            idx["소재ID(nad)"].astype(str).str.strip(),
+            idx["한글상품명"].astype(str).str.strip()
+        ))
+
+    # 전환유형별 장바구니 딕셔너리
+    cart_lookup = {}
+    if conv_df is not None and not conv_df.empty:
+        for _, r in conv_df.iterrows():
+            dt = pd.Timestamp(r.get("날짜")).date() if pd.notna(r.get("날짜")) else None
+            nad = str(r.get("소재ID", "")).strip()
+            cnt = int(float(str(r.get("전환수", 0)).replace(",", "") or 0))
+            if dt and nad:
+                cart_lookup[(dt, nad)] = cart_lookup.get((dt, nad), 0) + cnt
+
+    def _parse_date(s):
+        s = str(s).strip().rstrip(".")
+        parts = s.split(".")
+        if len(parts) == 3:
+            return pd.to_datetime(
+                f"{parts[0]}-{parts[1].zfill(2)}-{parts[2].zfill(2)}",
+                errors="coerce")
+        return pd.to_datetime(s, errors="coerce")
+
+    def _num(v, d=0):
+        try: return float(str(v).replace(",", "")) if pd.notna(v) else d
+        except: return d
+
+    # ── BSA 일별 디바이스 비용 계산 함수 ──────────────────────
+    def _daily_cost(device: str, date: pd.Timestamp) -> float:
+        """
+        device: 'PC' or 'MO'
+        date  : 해당 날짜
+        반환  : VAT 제외 일별 총 예산 (계약금액 / 1.1 / 운영일수)
+        """
+        info = bsa_contracts.get(device, {})
+        if not info:
+            return 0.0
+        try:
+            amount_vat  = float(info.get("amount_vat", 0))
+            start_dt    = pd.Timestamp(info.get("start"))
+            end_dt      = pd.Timestamp(info.get("end"))
+            run_days    = max((end_dt - start_dt).days + 1, 1)
+            daily_excl_vat = (amount_vat / 1.1) / run_days
+            return daily_excl_vat
+        except Exception:
+            return 0.0
+
+    # ── 날짜 × 디바이스 기준 노출>0 nad 목록 사전 구축 ─────────
+    df_raw["_날짜"] = df_raw["일별"].apply(_parse_date)
+    df_raw["_노출"] = pd.to_numeric(df_raw.get("노출수", 0), errors="coerce").fillna(0)
+    df_raw["_광고그룹"] = df_raw["광고그룹"].astype(str).str.strip()
+
+    # 디바이스 추출: BSA_PC → PC, BSA_MO → MO
+    def _device(grp):
+        if "MO" in grp.upper(): return "MO"
+        if "PC" in grp.upper(): return "PC"
+        return ""
+    df_raw["_device"] = df_raw["_광고그룹"].apply(_device)
+
+    # (날짜.date, device) → 해당일 노출>0 nad 목록 [(nad, 노출수), ...]
+    from collections import defaultdict
+    pos_imp = defaultdict(list)  # {(date, device): [(nad, imp), ...]}
+    for _, r in df_raw.iterrows():
+        dt = r["_날짜"].date() if pd.notna(r["_날짜"]) else None
+        dev = r["_device"]
+        imp = r["_노출"]
+        nad = str(r.get("소재", "")).strip()
+        if dt and dev and imp > 0:
+            pos_imp[(dt, dev)].append((nad, imp))
+
+    # ── 행별 비용 계산 ─────────────────────────────────────────
+    rows = []
+    for _, r in df_raw.iterrows():
+        dt = r["_날짜"]
+        dev = r["_device"]
+        nad_raw = str(r.get("소재", "")).strip()
+        imp = r["_노출"]
+
+        # 캠페인명: 날짜 기반 연월 + BSA
+        try:
+            ts = pd.Timestamp(dt)
+            prefix = f"{str(ts.year)[-2:]}{str(ts.month).zfill(2)}"
+        except Exception:
+            prefix = ""
+        campaign_name = f"{prefix}_BSA" if prefix else "BSA"
+
+        # 광고명: nad → 한글
+        ad_name = nad_lookup.get(nad_raw, nad_raw)
+
+        # 비용 계산
+        cost = 0.0
+        if pd.notna(dt) and dev and imp > 0:
+            daily_budget = _daily_cost(dev, dt)
+            key = (dt.date(), dev)
+            candidates = pos_imp.get(key, [])
+            total_imp_pos = sum(c[1] for c in candidates)
+            if total_imp_pos > 0:
+                # 노출 비례 배분
+                cost = daily_budget * (imp / total_imp_pos)
+
+        # 장바구니
+        cart = 0
+        if pd.notna(dt):
+            cart = cart_lookup.get((dt.date(), nad_raw), 0)
+
+        rows.append({
+            "날짜":       dt,
+            "캠페인명":   campaign_name,
+            "광고그룹명": r["_광고그룹"],
+            "광고명":     ad_name,
+            "비용":       cost,
+            "노출":       int(imp),
+            "클릭":       int(_num(r.get("클릭수", 0))),
+            "구매":       int(_num(r.get("구매완료 전환수", 0))),
+            "매출액":     int(_num(r.get("구매완료 전환매출액(원)", 0))),
+            "장바구니":   int(cart),
+            "도달":       None,
+            "참여":       None,
+            "팔로우":     None,
+            "동영상 조회": None,
+        })
+
+    df = pd.DataFrame(rows, columns=REPORT_COLS)
+    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+    return df.sort_values(["날짜", "캠페인명", "광고그룹명", "광고명"]).reset_index(drop=True)
+
+
 TRANSFORM_MAP = {
     "Naver ADVoost": transform_advoost,
+    "Naver SSA":     transform_naver_ssa,
+    "Naver BSA":     transform_naver_bsa,
     "Meta":          transform_meta,
-    # "TikTok": transform_tiktok,
-    # "Kakao":  transform_kakao,
 }
 
 # ── 매체 자동 감지용 고유 컬럼 시그니처 ──────────────────────
@@ -843,9 +1136,95 @@ if "meta_api_df"         not in st.session_state: st.session_state.meta_api_df  
 if "advoost_product_df"  not in st.session_state: st.session_state.advoost_product_df  = pd.DataFrame()
 if "integrated_df"       not in st.session_state: st.session_state.integrated_df       = pd.DataFrame()
 if "manual_report_df"    not in st.session_state: st.session_state.manual_report_df    = pd.DataFrame()
-if "naver_creative_index" not in st.session_state: st.session_state.naver_creative_index = pd.DataFrame(
-    columns=["소재ID(nad)", "한글상품명", "카테고리"])
+# ══════════════════════════════════════════════════════════════
+# Naver 소재 인덱스 기본값 (4/12 통합 리포트 기준 확정 매핑)
+# 앱 내 편집 기능으로 언제든 추가·수정 가능
+# ══════════════════════════════════════════════════════════════
+DEFAULT_NAD_INDEX = [
+    # ── SSA PC 선케어 ─────────────────────────────────────────
+    ("nad-a001-02-000000299850482", "산들쑥선스틱",              "선케어"),
+    ("nad-a001-02-000000299850483", "맑은쌀선크림",              "선케어"),
+    ("nad-a001-02-000000316879115", "맑은쌀선크림 아쿠아프레쉬",   "선케어"),
+    ("nad-a001-02-000000404250688", "데일리 틴티드 선세럼",       "선케어"),
+    ("nad-a001-02-000000426977044", "[2+1] 맑은쌀선크림 아쿠아프레쉬 50ml + 미니 선크림 10ml 2종 + 기프트백", "선케어"),
+    ("nad-a001-02-000000299850484", "인삼선세럼",                "선케어"),   # PC 선케어 미매핑
+    ("nad-a001-02-000000426977045", "[2+1] 맑은쌀선크림 50ml + 미니 선크림 10ml 2종 + 기프트백", "선케어"),
+    # ── SSA PC 에센스 ─────────────────────────────────────────
+    ("nad-a001-02-000000311706573", "맑은쌀채운토너",             "에센스"),
+    ("nad-a001-02-000000299855867", "인삼스네일세럼",             "에센스"),
+    ("nad-a001-02-000000299855868", "인삼 에센스워터 150ml",      "에센스"),
+    ("nad-a001-02-000000299855869", "쌀겨수맑은세럼 30ml",        "에센스"),
+    ("nad-a001-02-000000299855870", "산들녹차세럼",               "에센스"),
+    ("nad-a001-02-000000299855871", "광채프로폴리스세럼",          "에센스"),
+    ("nad-a001-02-000000299855872", "청매실 AHA BHA 토너 150ml",  "에센스"),
+    ("nad-a001-02-000000299855873", "붉은팥 PDRN 모공탄력 세럼 30mL", "에센스"),
+    ("nad-a001-02-000000299855874", "병풀비타세럼 30ml",           "에센스"),
+    ("nad-a001-02-000000455153522", "맑은쌀채운토너",             "에센스"),
+    ("nad-a001-02-000000484203002", "붉은팥 수분 워터 젤 100ml",  "에센스"),
+    # ── SSA PC 크림 ──────────────────────────────────────────
+    ("nad-a001-02-000000299856055", "인삼아이크림",               "크림"),
+    ("nad-a001-02-000000299856056", "조선미녀크림 50ml",          "크림"),
+    ("nad-a001-02-000000311706586", "조선미녀크림 대용량 100ml",   "크림"),
+    # ── SSA PC 클렌징 ─────────────────────────────────────────
+    ("nad-a001-02-000000299856487", "인삼 클렌징오일 210ml",      "클렌징"),
+    ("nad-a001-02-000000299856489", "미감클렌징밤 100ml",         "클렌징"),
+    ("nad-a001-02-000000299856490", "꽃담필링젤 100ml",           "클렌징"),
+    ("nad-a001-02-000000299856488", "산뜻청매실클렌저",            "클렌징"),
+    # ── SSA PC 마스크팩 ───────────────────────────────────────
+    ("nad-a001-02-000000299855367", "병풀진정마스크",              "마스크팩"),
+    ("nad-a001-02-000000299855368", "붉은 팥 모공정화마스크",      "마스크팩"),
+    ("nad-a001-02-000000308252999", "맑은쌀꿀채운마스크",          "마스크팩"),
+    # ── SSA MO 선케어 ─────────────────────────────────────────
+    ("nad-a001-02-000000299850332", "산들쑥선스틱",              "선케어"),
+    ("nad-a001-02-000000299850333", "맑은쌀선크림",              "선케어"),
+    ("nad-a001-02-000000299850334", "인삼선세럼",                "선케어"),
+    ("nad-a001-02-000000316879017", "맑은쌀선크림 아쿠아프레쉬",   "선케어"),
+    ("nad-a001-02-000000404250591", "데일리 틴티드 선세럼",       "선케어"),
+    ("nad-a001-02-000000426976983", "[2+1] 맑은쌀선크림 50ml + 미니 선크림 10ml 2종 + 기프트백", "선케어"),
+    ("nad-a001-02-000000426976981", "[2+1] 맑은쌀선크림 아쿠아프레쉬 50ml + 미니 선크림 10ml 2종 + 기프트백", "선케어"),
+    # ── SSA MO 에센스 ─────────────────────────────────────────
+    ("nad-a001-02-000000299852742", "인삼스네일세럼",             "에센스"),
+    ("nad-a001-02-000000299852743", "인삼 에센스워터 150ml",      "에센스"),
+    ("nad-a001-02-000000299852744", "쌀겨수맑은세럼 30ml",        "에센스"),
+    ("nad-a001-02-000000299852745", "산들녹차세럼",               "에센스"),
+    ("nad-a001-02-000000299852746", "광채프로폴리스세럼",          "에센스"),
+    ("nad-a001-02-000000299852747", "청매실 AHA BHA 토너 150ml",  "에센스"),
+    ("nad-a001-02-000000299852748", "붉은팥 PDRN 모공탄력 세럼 30mL", "에센스"),
+    ("nad-a001-02-000000299855331", "청매실 AHA BHA 토너 150ml",  "에센스"),
+    ("nad-a001-02-000000311706439", "맑은쌀채운토너",             "에센스"),
+    ("nad-a001-02-000000484202980", "붉은팥 PDRN 모공탄력 세럼 30mL", "에센스"),
+    ("nad-a001-02-000000455151383", "붉은팥 수분 워터 젤 100ml",  "에센스"),
+    # ── SSA MO 크림 ──────────────────────────────────────────
+    ("nad-a001-02-000000299853563", "인삼아이크림",               "크림"),
+    ("nad-a001-02-000000299853564", "조선미녀크림 50ml",          "크림"),
+    ("nad-a001-02-000000311706451", "조선미녀크림 대용량 100ml",   "크림"),
+    # ── SSA MO 클렌징 ─────────────────────────────────────────
+    ("nad-a001-02-000000299854436", "인삼 클렌징오일 210ml",      "클렌징"),
+    ("nad-a001-02-000000299854437", "산뜻청매실클렌저",            "클렌징"),
+    ("nad-a001-02-000000299854438", "미감클렌징밤 100ml",         "클렌징"),
+    ("nad-a001-02-000000299854439", "미감클렌징밤 100ml",         "클렌징"),
+    # ── SSA MO 마스크팩 ───────────────────────────────────────
+    ("nad-a001-02-000000299850935", "병풀진정마스크",              "마스크팩"),
+    ("nad-a001-02-000000300342753", "붉은 팥 모공정화마스크",      "마스크팩"),
+    ("nad-a001-02-000000308252834", "맑은쌀꿀채운마스크",          "마스크팩"),
+    # ── BSA ──────────────────────────────────────────────────
+    ("nad-a001-04-000000485393620", "2604_BSA_A-3",               "BSA"),
+    ("nad-a001-04-000000485457260(삭제)", "2603_BSA_B",           "BSA"),
+    ("nad-a001-04-000000497071504", "2604_BSA_A-3",               "BSA"),
+    ("nad-a001-04-000000501582571", "2604_BSA_A-3",               "BSA"),
+    ("nad-a001-04-000000502971125", "2604_BSA_A-3",               "BSA"),
+    ("nad-a001-04-000000502973091", "2604_BSA_A-3",               "BSA"),
+]
+
+_DEFAULT_NAD_DF = pd.DataFrame(DEFAULT_NAD_INDEX,
+                                columns=["소재ID(nad)", "한글상품명", "카테고리"])
+
+if "naver_creative_index" not in st.session_state: st.session_state.naver_creative_index = _DEFAULT_NAD_DF.copy()
 if "naver_conv_df"        not in st.session_state: st.session_state.naver_conv_df        = pd.DataFrame()
+if "bsa_contracts"        not in st.session_state: st.session_state.bsa_contracts        = {
+    "PC": {"amount_vat": 0, "start": "", "end": ""},
+    "MO": {"amount_vat": 0, "start": "", "end": ""},
+}
 
 # ══════════════════════════════════════════════════════════════
 # 영구 메모리 — comment_history를 JSON 파일에 저장/로드
@@ -3217,9 +3596,68 @@ elif page == "🔄 RAW 리포트 변환":
                 if platform in ("Naver SSA", "Naver BSA"):
                     st.caption(f"**{platform}** — RD 파일 2종 업로드")
 
+                    # ── BSA 전용: 계약 정보 입력 ─────────────────
+                    if platform == "Naver BSA":
+                        st.markdown("**💰 BSA 계약 정보 입력** (비용 자동 계산용)")
+                        st.caption("계약금액(VAT 포함)과 운영 기간을 입력하면 일별 비용이 자동 계산됩니다.")
+
+                        bsa_c1, bsa_c2 = st.columns(2)
+                        with bsa_c1:
+                            st.markdown("**PC 캠페인**")
+                            pc_amt = st.number_input(
+                                "계약금액 (VAT 포함, 원)",
+                                value=int(st.session_state.bsa_contracts.get("PC",{}).get("amount_vat",0)),
+                                step=10000, format="%d", key="bsa_pc_amt")
+                            pc_start = st.date_input(
+                                "계약 시작일",
+                                value=pd.Timestamp(st.session_state.bsa_contracts.get("PC",{}).get("start","2026-04-01")).date()
+                                      if st.session_state.bsa_contracts.get("PC",{}).get("start") else None,
+                                key="bsa_pc_start")
+                            pc_end = st.date_input(
+                                "계약 종료일",
+                                value=pd.Timestamp(st.session_state.bsa_contracts.get("PC",{}).get("end","2026-04-30")).date()
+                                      if st.session_state.bsa_contracts.get("PC",{}).get("end") else None,
+                                key="bsa_pc_end")
+                            if pc_amt and pc_start and pc_end:
+                                run_days_pc = max((pd.Timestamp(pc_end) - pd.Timestamp(pc_start)).days + 1, 1)
+                                daily_pc = pc_amt / 1.1 / run_days_pc
+                                st.caption(f"운영일수: {run_days_pc}일 | 일별 비용(VAT제외): **{daily_pc:,.2f}원**")
+
+                        with bsa_c2:
+                            st.markdown("**MO 캠페인**")
+                            mo_amt = st.number_input(
+                                "계약금액 (VAT 포함, 원)",
+                                value=int(st.session_state.bsa_contracts.get("MO",{}).get("amount_vat",0)),
+                                step=10000, format="%d", key="bsa_mo_amt")
+                            mo_start = st.date_input(
+                                "계약 시작일",
+                                value=pd.Timestamp(st.session_state.bsa_contracts.get("MO",{}).get("start","2026-04-01")).date()
+                                      if st.session_state.bsa_contracts.get("MO",{}).get("start") else None,
+                                key="bsa_mo_start")
+                            mo_end = st.date_input(
+                                "계약 종료일",
+                                value=pd.Timestamp(st.session_state.bsa_contracts.get("MO",{}).get("end","2026-04-30")).date()
+                                      if st.session_state.bsa_contracts.get("MO",{}).get("end") else None,
+                                key="bsa_mo_end")
+                            if mo_amt and mo_start and mo_end:
+                                run_days_mo = max((pd.Timestamp(mo_end) - pd.Timestamp(mo_start)).days + 1, 1)
+                                daily_mo = mo_amt / 1.1 / run_days_mo
+                                st.caption(f"운영일수: {run_days_mo}일 | 일별 비용(VAT제외): **{daily_mo:,.2f}원**")
+
+                        if st.button("💾 계약 정보 저장", key="save_bsa_contracts"):
+                            st.session_state.bsa_contracts = {
+                                "PC": {"amount_vat": pc_amt,
+                                       "start": str(pc_start), "end": str(pc_end)},
+                                "MO": {"amount_vat": mo_amt,
+                                       "start": str(mo_start), "end": str(mo_end)},
+                            }
+                            st.success("✅ 계약 정보 저장 완료!")
+
+                        st.divider()
+
                     nc1, nc2 = st.columns(2)
                     with nc1:
-                        st.markdown("**① 일별 성과 RD** (비용·구매·매출)")
+                        st.markdown("**① 일별 성과 RD** (구매·매출·노출·클릭)")
                         up_main = st.file_uploader(
                             f"{platform} 일별 RD",
                             type=["csv","xlsx"],
@@ -3238,19 +3676,27 @@ elif page == "🔄 RAW 리포트 변환":
                     if up_main:
                         try:
                             df_raw_m = load_naver_file_auto(up_main)
-                            df_std = standardize_raw_df(df_raw_m, platform)
 
-                            # ① 소재 인덱스 VLOOKUP (nad → 한글상품명)
-                            df_std = apply_creative_index(
-                                df_std, st.session_state.naver_creative_index)
-
-                            # ② 전환유형별 RD가 있으면 장바구니 병합
+                            # 전환유형별 RD 파싱 (장바구니 VLOOKUP용)
+                            df_conv_parsed = None
                             if up_conv:
-                                df_conv = parse_naver_conv_rd(up_conv)
-                                st.session_state.naver_conv_df = df_conv
-                                df_std = merge_naver_cart(df_std, df_conv)
-                                st.info(f"🛒 장바구니 전환 데이터 병합 완료 "
-                                        f"({len(df_conv):,}건)")
+                                df_conv_parsed = parse_naver_conv_rd(up_conv)
+                                st.session_state.naver_conv_df = df_conv_parsed
+                                st.info(f"🛒 전환유형별 RD 로드: 장바구니 {len(df_conv_parsed):,}건")
+
+                            # BSA / SSA 분기
+                            if platform == "Naver BSA":
+                                df_std = transform_naver_bsa(
+                                    df_raw_m,
+                                    conv_df=df_conv_parsed,
+                                    bsa_contracts=st.session_state.bsa_contracts,
+                                )
+                            else:
+                                df_std = transform_naver_ssa(
+                                    df_raw_m,
+                                    conv_df=df_conv_parsed,
+                                    platform=platform,
+                                )
 
                             st.session_state.manual_upload_dfs[platform] = df_std
 
@@ -3260,11 +3706,16 @@ elif page == "🔄 RAW 리포트 변환":
                             # 미리보기
                             preview_m = df_std.copy()
                             preview_m["날짜"] = preview_m["날짜"].dt.strftime("%Y-%m-%d")
-                            st.dataframe(preview_m.head(15), use_container_width=True,
-                                         height=240, hide_index=True)
+                            st.dataframe(
+                                preview_m[["날짜","캠페인명","광고그룹명","광고명",
+                                           "비용","노출","클릭","구매","매출액","장바구니"]
+                                          ].head(20),
+                                use_container_width=True, height=300, hide_index=True)
 
                         except Exception as e:
+                            import traceback
                             st.error(f"파일 처리 오류: {e}")
+                            st.code(traceback.format_exc())
 
                     # 현황 표시
                     if platform in st.session_state.manual_upload_dfs:
