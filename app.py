@@ -516,12 +516,96 @@ def transform_naver_bsa(df_raw, conv_df=None,
     df["매체"] = "Naver BSA"
     return df.sort_values(["날짜", "캠페인명", "광고그룹명", "광고명"]).reset_index(drop=True)
 
+def transform_tiktok(df_raw):
+    """
+    TikTok Collaborative Ads RAW → 내부 리포트 컬럼 변환
+
+    TikTok RD 파일 특이사항:
+      1. '총 구매 수(모든 채널)'  컬럼이 2개 존재 (pandas가 .1 suffix 자동 부여)
+         - 첫 번째 (원본명 동일): 구매 건수
+         - 두 번째 (.1 suffix): 구매 매출액 (원)
+      2. 마지막 행이 '총 N개 결과' 합계행 → 제거 필요
+      3. WebApp / Web 캠페인이 하나의 파일에 통합 → 중복 아님, 그대로 합산
+
+    컬럼 매핑:
+      일별                          → 날짜
+      캠페인 이름                   → 캠페인명
+      광고 그룹 이름                → 광고그룹명
+      광고 이름                     → 광고명
+      비용                          → 비용 (VAT 없음, 그대로)
+      노출수                        → 노출
+      클릭수(목적지)                → 클릭
+      총 구매 수(모든 채널)         → 구매 (건수)
+      총 구매 수(모든 채널).1       → 매출액 (원)
+      총 장바구니에 담기 수(모든 채널) → 장바구니담기수
+      도달                          → 도달
+      동영상 조회수                 → 동영상조회
+    """
+    df_raw = df_raw.copy()
+    df_raw.columns = [str(c).strip() for c in df_raw.columns]
+
+    # ── 합계행 제거 ('총 N개 결과' 패턴) ─────────────────────
+    camp_col = next((c for c in df_raw.columns if "캠페인" in c), None)
+    if camp_col:
+        df_raw = df_raw[
+            ~df_raw[camp_col].astype(str).str.contains(r"^총\s*\d+", na=False)
+        ].copy()
+
+    def _num(v, default=0):
+        try:
+            return float(str(v).replace(",", "")) if pd.notna(v) else default
+        except:
+            return default
+
+    def _parse_date(s):
+        s = str(s).strip()
+        return pd.to_datetime(s, errors="coerce")
+
+    # ── 컬럼명 확정 (pandas가 중복 컬럼에 .1 suffix 부여) ────
+    # 구매 건수: '총 구매 수(모든 채널)'
+    # 매출액   : '총 구매 수(모든 채널).1'
+    purchase_col = next(
+        (c for c in df_raw.columns if "총 구매 수" in c and not c.endswith(".1")), None
+    )
+    revenue_col = next(
+        (c for c in df_raw.columns if "총 구매 수" in c and c.endswith(".1")), None
+    )
+    cart_col = next(
+        (c for c in df_raw.columns if "장바구니" in c), None
+    )
+
+    rows = []
+    for _, r in df_raw.iterrows():
+        rows.append({
+            "날짜":       _parse_date(r.get("일별", "")),
+            "캠페인명":   str(r.get("캠페인 이름", "")).strip(),
+            "광고그룹명": str(r.get("광고 그룹 이름", "")).strip(),
+            "광고명":     str(r.get("광고 이름", "")).strip(),
+            "비용":       _num(r.get("비용", 0)),
+            "노출":       int(_num(r.get("노출수", 0))),
+            "클릭":       int(_num(r.get("클릭수(목적지)", 0))),
+            "구매":       int(_num(r.get(purchase_col, 0) if purchase_col else 0)),
+            "매출액":     int(_num(r.get(revenue_col, 0) if revenue_col else 0)),
+            "장바구니":   int(_num(r.get(cart_col, 0) if cart_col else 0)),
+            "도달":       int(_num(r.get("도달", 0))),
+            "참여":       None,
+            "팔로우":     None,
+            "동영상 조회": int(_num(r.get("동영상 조회수", 0))),
+        })
+
+    df = pd.DataFrame(rows, columns=REPORT_COLS)
+    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+    df["매체"] = "TikTok"
+    return df.sort_values(
+        ["날짜", "캠페인명", "광고그룹명", "광고명"]
+    ).reset_index(drop=True)
 
 TRANSFORM_MAP = {
     "Naver ADVoost": transform_advoost,
     "Naver SSA":     transform_naver_ssa,
     "Naver BSA":     transform_naver_bsa,
     "Meta":          transform_meta,
+    "TikTok":        transform_tiktok,  
 }
 
 # ── 매체 자동 감지용 고유 컬럼 시그니처 ──────────────────────
@@ -624,6 +708,7 @@ PLATFORM_COL_MAPS = {
         "purchase value": "매출액",
         "complete payment value": "매출액",
         "conversion value": "매출액",
+        "총 구매 수(모든 채널).1": "매출액",
         # 장바구니 — TikTok 협력광고는 '총 장바구니에 담기 수(모든 채널)'
         "총 장바구니에 담기 수(모든 채널)": "장바구니담기수",
         "add to cart": "장바구니담기수",
