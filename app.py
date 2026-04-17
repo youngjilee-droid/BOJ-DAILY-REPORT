@@ -545,7 +545,7 @@ def transform_tiktok(df_raw):
     df_raw.columns = [str(c).strip() for c in df_raw.columns]
 
     # ── 합계행 제거 ('총 N개 결과' 패턴) ─────────────────────
-    camp_col = next((c for c in df_raw.columns if "캠페인" in c), None)
+   camp_col = next((c for c in df_raw.columns if "캠페인" in c), None)
     if camp_col:
         df_raw = df_raw[
             ~df_raw[camp_col].astype(str).str.contains(r"^총\s*\d+", na=False)
