@@ -516,96 +516,12 @@ def transform_naver_bsa(df_raw, conv_df=None,
     df["매체"] = "Naver BSA"
     return df.sort_values(["날짜", "캠페인명", "광고그룹명", "광고명"]).reset_index(drop=True)
 
-def transform_tiktok(df_raw):
-    """
-    TikTok Collaborative Ads RAW → 내부 리포트 컬럼 변환
-
-    TikTok RD 파일 특이사항:
-      1. '총 구매 수(모든 채널)'  컬럼이 2개 존재 (pandas가 .1 suffix 자동 부여)
-         - 첫 번째 (원본명 동일): 구매 건수
-         - 두 번째 (.1 suffix): 구매 매출액 (원)
-      2. 마지막 행이 '총 N개 결과' 합계행 → 제거 필요
-      3. WebApp / Web 캠페인이 하나의 파일에 통합 → 중복 아님, 그대로 합산
-
-    컬럼 매핑:
-      일별                          → 날짜
-      캠페인 이름                   → 캠페인명
-      광고 그룹 이름                → 광고그룹명
-      광고 이름                     → 광고명
-      비용                          → 비용 (VAT 없음, 그대로)
-      노출수                        → 노출
-      클릭수(목적지)                → 클릭
-      총 구매 수(모든 채널)         → 구매 (건수)
-      총 구매 수(모든 채널).1       → 매출액 (원)
-      총 장바구니에 담기 수(모든 채널) → 장바구니담기수
-      도달                          → 도달
-      동영상 조회수                 → 동영상조회
-    """
-    df_raw = df_raw.copy()
-    df_raw.columns = [str(c).strip() for c in df_raw.columns]
-
-    # ── 합계행 제거 ('총 N개 결과' 패턴) ─────────────────────
-   camp_col = next((c for c in df_raw.columns if "캠페인" in c), None)
-    if camp_col:
-        df_raw = df_raw[
-            ~df_raw[camp_col].astype(str).str.contains(r"^총\s*\d+", na=False)
-        ].copy()
-
-    def _num(v, default=0):
-        try:
-            return float(str(v).replace(",", "")) if pd.notna(v) else default
-        except:
-            return default
-
-    def _parse_date(s):
-        s = str(s).strip()
-        return pd.to_datetime(s, errors="coerce")
-
-    # ── 컬럼명 확정 (pandas가 중복 컬럼에 .1 suffix 부여) ────
-    # 구매 건수: '총 구매 수(모든 채널)'
-    # 매출액   : '총 구매 수(모든 채널).1'
-    purchase_col = next(
-        (c for c in df_raw.columns if "총 구매 수" in c and not c.endswith(".1")), None
-    )
-    revenue_col = next(
-        (c for c in df_raw.columns if "총 구매 수" in c and c.endswith(".1")), None
-    )
-    cart_col = next(
-        (c for c in df_raw.columns if "장바구니" in c), None
-    )
-
-    rows = []
-    for _, r in df_raw.iterrows():
-        rows.append({
-            "날짜":       _parse_date(r.get("일별", "")),
-            "캠페인명":   str(r.get("캠페인 이름", "")).strip(),
-            "광고그룹명": str(r.get("광고 그룹 이름", "")).strip(),
-            "광고명":     str(r.get("광고 이름", "")).strip(),
-            "비용":       _num(r.get("비용", 0)),
-            "노출":       int(_num(r.get("노출수", 0))),
-            "클릭":       int(_num(r.get("클릭수(목적지)", 0))),
-            "구매":       int(_num(r.get(purchase_col, 0) if purchase_col else 0)),
-            "매출액":     int(_num(r.get(revenue_col, 0) if revenue_col else 0)),
-            "장바구니":   int(_num(r.get(cart_col, 0) if cart_col else 0)),
-            "도달":       int(_num(r.get("도달", 0))),
-            "참여":       None,
-            "팔로우":     None,
-            "동영상 조회": int(_num(r.get("동영상 조회수", 0))),
-        })
-
-    df = pd.DataFrame(rows, columns=REPORT_COLS)
-    df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
-    df["매체"] = "TikTok"
-    return df.sort_values(
-        ["날짜", "캠페인명", "광고그룹명", "광고명"]
-    ).reset_index(drop=True)
 
 TRANSFORM_MAP = {
     "Naver ADVoost": transform_advoost,
     "Naver SSA":     transform_naver_ssa,
     "Naver BSA":     transform_naver_bsa,
     "Meta":          transform_meta,
-    "TikTok":        transform_tiktok,  
 }
 
 # ── 매체 자동 감지용 고유 컬럼 시그니처 ──────────────────────
@@ -708,7 +624,6 @@ PLATFORM_COL_MAPS = {
         "purchase value": "매출액",
         "complete payment value": "매출액",
         "conversion value": "매출액",
-        "총 구매 수(모든 채널).1": "매출액",
         # 장바구니 — TikTok 협력광고는 '총 장바구니에 담기 수(모든 채널)'
         "총 장바구니에 담기 수(모든 채널)": "장바구니담기수",
         "add to cart": "장바구니담기수",
@@ -3838,7 +3753,22 @@ elif page == "🔄 RAW 리포트 변환":
                             else:
                                 df_raw_m = pd.read_excel(up_file, sheet_name=0)
 
-                            df_std = standardize_raw_df(df_raw_m, platform)
+                            df_raw_m.columns = [str(c).strip() for c in df_raw_m.columns]
+
+                            # TRANSFORM_MAP 등록 매체 → 전용 함수 사용 (정확한 컬럼 매핑 보장)
+                            if platform in TRANSFORM_MAP:
+                                df_std = TRANSFORM_MAP[platform](df_raw_m)
+                                # REPORT_COLS → INTEGRATED_COLS 컬럼명 통일
+                                df_std = df_std.rename(columns={
+                                    "장바구니":   "장바구니담기수",
+                                    "동영상 조회": "동영상조회",
+                                })
+                                for col in INTEGRATED_COLS:
+                                    if col not in df_std.columns:
+                                        df_std[col] = None
+                            else:
+                                df_std = standardize_raw_df(df_raw_m, platform)
+
                             st.session_state.manual_upload_dfs[platform] = df_std
 
                             dates_m = df_std["날짜"].dropna().dt.date
@@ -3850,7 +3780,9 @@ elif page == "🔄 RAW 리포트 변환":
                                          height=200, hide_index=True)
 
                         except Exception as e:
+                            import traceback
                             st.error(f"파일 처리 오류: {e}")
+                            st.code(traceback.format_exc())
 
                     if platform in st.session_state.manual_upload_dfs:
                         df_ex = st.session_state.manual_upload_dfs[platform]
@@ -3975,6 +3907,36 @@ elif page == "🔄 RAW 리포트 변환":
             from openpyxl.styles import Font as _F, PatternFill as _PF, Alignment as _AL, Border as _BD, Side as _SD
             from openpyxl.utils import get_column_letter as _gcl
 
+            def _normalize_to_internal(df_in: pd.DataFrame) -> pd.DataFrame:
+                """
+                REPORT_COLS or INTEGRATED_COLS 기준 DataFrame을
+                내부 리포트(INTERNAL_REPORT_COLS) 기준으로 표준화.
+                - 장바구니담기수 → 장바구니
+                - 동영상조회    → 동영상 조회
+                - 월·주차 자동 추가
+                - 내부 리포트 컬럼만 선택
+                """
+                df = df_in.copy()
+                df = df.rename(columns={
+                    "장바구니담기수": "장바구니",
+                    "동영상조회":     "동영상 조회",
+                })
+                df["날짜"] = pd.to_datetime(df["날짜"], errors="coerce")
+                df["월"]   = df["날짜"].apply(lambda x: f"{x.month}월" if pd.notna(x) else "")
+                df["주차"] = df["날짜"].apply(lambda x:
+                    f"{x.month}월{((x.day + x.replace(day=1).weekday())//7)+1}주차"
+                    if pd.notna(x) else "")
+                for col in INTERNAL_REPORT_COLS:
+                    if col not in df.columns:
+                        df[col] = None
+                # 수치 컬럼 정규화
+                for col in INTERNAL_NUMERIC_COLS:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+                df["날짜"] = df["날짜"].dt.date
+                return df.sort_values(
+                    [c for c in ["날짜","캠페인명","광고그룹명","광고명"] if c in df.columns]
+                ).reset_index(drop=True)[INTERNAL_REPORT_COLS]
+
             def _build_manual_xlsx():
                 HF=_PF("solid",fgColor="1F4E79"); HFnt=_F(name="Arial",bold=True,color="FFFFFF",size=10)
                 DF=_F(name="Arial",size=10); TH=_SD(style="thin",color="D0D0D0")
@@ -3984,60 +3946,70 @@ elif page == "🔄 RAW 리포트 변환":
                 L=_AL(horizontal="left",  vertical="center")
                 R=_AL(horizontal="right", vertical="center")
                 NF={"비용":"#,##0","노출":"#,##0","클릭":"#,##0","구매":"#,##0",
-                    "매출액":"#,##0","장바구니담기수":"#,##0","도달":"#,##0",
-                    "참여":"#,##0","팔로우":"#,##0","동영상조회":"#,##0"}
+                    "매출액":"#,##0","장바구니":"#,##0","도달":"#,##0",
+                    "참여":"#,##0","팔로우":"#,##0","동영상 조회":"#,##0"}
                 wb = _WB(); wb.remove(wb.active)
 
-                # 매체별 시트
+                # 매체별 시트 — 내부 리포트 포맷으로 변환 후 저장
                 for m, df_m in st.session_state.manual_upload_dfs.items():
                     ws = wb.create_sheet(title=m[:31])
-                    cols_out = [c for c in INTEGRATED_COLS if c != "매체"]
-                    for ci, col in enumerate(cols_out, 1):
+                    df_sheet = _normalize_to_internal(df_m)
+                    for ci, col in enumerate(INTERNAL_REPORT_COLS, 1):
                         cell = ws.cell(row=1,column=ci,value=col)
                         cell.font=HFnt; cell.fill=HF; cell.alignment=C; cell.border=BR
-                    for ri, row in df_m.reset_index(drop=True).iterrows():
+                    for ri, row in df_sheet.reset_index(drop=True).iterrows():
                         fill = AF if ri%2==1 else None
-                        for ci, col in enumerate(cols_out, 1):
+                        for ci, col in enumerate(INTERNAL_REPORT_COLS, 1):
                             val = row.get(col)
-                            if isinstance(val, pd.Timestamp):
-                                val = val.strftime("%Y-%m-%d")
-                            elif isinstance(val, float) and pd.isna(val):
-                                val = None
+                            if isinstance(val, float) and pd.isna(val): val = None
                             cell = ws.cell(row=ri+2,column=ci,value=val)
                             cell.font=DF; cell.border=BR
                             if fill: cell.fill=fill
                             cell.alignment = R if col in NF else (C if col=="날짜" else L)
                             if col in NF and val is not None:
                                 cell.number_format = NF[col]
-                    for ci, col in enumerate(cols_out, 1):
-                        ws.column_dimensions[_gcl(ci)].width = 14 if col in NF else (13 if col=="날짜" else 20)
+                    COL_W={"월":8,"주차":10,"날짜":13,"캠페인명":22,"광고그룹명":20,"광고명":28,
+                           "비용":14,"노출":12,"클릭":10,"구매":10,"매출액":14,"장바구니":10,
+                           "도달":10,"참여":10,"팔로우":10,"동영상 조회":12}
+                    for ci, col in enumerate(INTERNAL_REPORT_COLS, 1):
+                        ws.column_dimensions[_gcl(ci)].width = COL_W.get(col, 14)
                     ws.row_dimensions[1].height = 22
-                    ws.freeze_panes = "A2"
+                    ws.freeze_panes = "C2"  # 월·주차 고정
 
-                # Total_Raw 시트 (전체 통합)
+                # Total_Raw 시트 (전체 통합 — 내부 리포트 포맷)
                 ws_total = wb.create_sheet(title="Total_Raw")
-                cols_total = INTEGRATED_COLS
-                for ci, col in enumerate(cols_total, 1):
+                all_normalized = []
+                for m, df_m in st.session_state.manual_upload_dfs.items():
+                    df_n = _normalize_to_internal(df_m)
+                    df_n["매체"] = m
+                    all_normalized.append(df_n)
+                df_total_norm = pd.concat(all_normalized, ignore_index=True).sort_values(
+                    [c for c in ["날짜","매체","캠페인명","광고그룹명","광고명"]
+                     if c in pd.concat(all_normalized, ignore_index=True).columns]
+                ).reset_index(drop=True)
+
+                total_cols = INTERNAL_REPORT_COLS + (["매체"] if "매체" not in INTERNAL_REPORT_COLS else [])
+                for ci, col in enumerate(total_cols, 1):
                     cell = ws_total.cell(row=1,column=ci,value=col)
                     cell.font=HFnt; cell.fill=HF; cell.alignment=C; cell.border=BR
-                for ri, row in df_mr.reset_index(drop=True).iterrows():
+                for ri, row in df_total_norm.reset_index(drop=True).iterrows():
                     fill = AF if ri%2==1 else None
-                    for ci, col in enumerate(cols_total, 1):
-                        val = row.get(col)
-                        if isinstance(val, pd.Timestamp):
-                            val = val.strftime("%Y-%m-%d")
-                        elif isinstance(val, float) and pd.isna(val):
-                            val = None
+                    for ci, col in enumerate(total_cols, 1):
+                        val = row.get(col) if col in df_total_norm.columns else None
+                        if isinstance(val, float) and pd.isna(val): val = None
                         cell = ws_total.cell(row=ri+2,column=ci,value=val)
                         cell.font=DF; cell.border=BR
                         if fill: cell.fill=fill
                         cell.alignment = R if col in NF else (C if col=="날짜" else L)
                         if col in NF and val is not None:
                             cell.number_format = NF[col]
-                for ci, col in enumerate(cols_total, 1):
-                    ws_total.column_dimensions[_gcl(ci)].width = 14 if col in NF else (13 if col=="날짜" else 20)
+                COL_W={"월":8,"주차":10,"날짜":13,"캠페인명":22,"광고그룹명":20,"광고명":28,
+                       "비용":14,"노출":12,"클릭":10,"구매":10,"매출액":14,"장바구니":10,
+                       "도달":10,"참여":10,"팔로우":10,"동영상 조회":12,"매체":14}
+                for ci, col in enumerate(total_cols, 1):
+                    ws_total.column_dimensions[_gcl(ci)].width = COL_W.get(col, 14)
                 ws_total.row_dimensions[1].height = 22
-                ws_total.freeze_panes = "A2"
+                ws_total.freeze_panes = "C2"
 
                 buf = io.BytesIO(); wb.save(buf); buf.seek(0)
                 return buf
